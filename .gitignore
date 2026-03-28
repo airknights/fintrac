@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+service_account.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.idea/
+.vscode/
+.claude/
+*.swp
+.DS_Store
+Thumbs.db
+
+# TypeScript / Vite cache
+*.tsbuildinfo
+.vite/
