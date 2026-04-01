@@ -1,0 +1,34 @@
+name = "fintrac-plaid-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Uncomment to bind a custom domain route:
+# routes = [{ pattern = "api.yourdomain.com/plaid/*", zone_name = "yourdomain.com" }]
+
+[vars]
+# Non-secret vars can go here. Secrets must be set via:
+#   wrangler secret put PLAID_CLIENT_ID
+#   wrangler secret put PLAID_SECRET
+PLAID_ENV = "sandbox"
+ALLOWED_ORIGIN = "*"
+
+# For production, override PLAID_ENV and ALLOWED_ORIGIN with secrets/vars in the dashboard
+# or use an [env.production] block below:
+
+# [env.production]
+# vars = { PLAID_ENV = "production", ALLOWED_ORIGIN = "https://your-app.pages.dev" }
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
