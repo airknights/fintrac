@@ -1,5 +1,5 @@
 name = "fintrac"
-main = "auth-worker.js"
+main = "./dist/auth-worker.js"
 compatibility_date = "2026-04-01"
 
 [assets]
