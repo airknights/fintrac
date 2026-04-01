@@ -1,5 +1,17 @@
 name = "fintrac"
+main = "auth-worker.js"
 compatibility_date = "2026-04-01"
 
 [assets]
 directory = "./dist"
+binding = "ASSETS"
+
+[vars]
+PLAID_ENV = "sandbox"
+ALLOWED_ORIGIN = "*"
+
+# Secrets — set these in the Cloudflare dashboard or via CLI:
+#   wrangler secret put AUTH_USER
+#   wrangler secret put AUTH_PASS
+#   wrangler secret put PLAID_CLIENT_ID
+#   wrangler secret put PLAID_SECRET
