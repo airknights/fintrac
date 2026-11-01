@@ -49,9 +49,20 @@ Requires Node 22+ and Docker Desktop.
 Bank CSV exports vary in shape — some have a single signed `Amount` column,
 others split `Debit`/`Credit` into separate columns, and date formats differ.
 The import flow previews the file's columns and lets you map which column is
-which (date, description, amount or debit/credit) before importing. Importing
+which (date, description, and either one amount column or separate "money
+in" / "money out" columns) before importing. Importing
 the same file twice is safe — matching transactions are updated in place
 rather than duplicated.
+
+- **No header row?** Some banks (e.g. TD) export without one — untick
+  "First row is column headers" and columns show as Column 1, 2, …
+- **Several files at once:** pick multiple CSVs in the file picker (e.g. a
+  year exported month by month). They're imported in one transaction.
+- **Balance from the file:** map the optional Balance column and the
+  account's balance is set from the newest row. Debt balances are stored as a
+  positive amount owed regardless of the bank's sign.
+- **Saved mapping:** each account remembers its last column mapping, so the
+  next import is pick files → Import.
 
 ## Database
 

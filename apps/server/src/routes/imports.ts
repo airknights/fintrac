@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { withTransaction } from "../db/index.js";
+import { query, withTransaction } from "../db/index.js";
 import { upsertTransaction, type TransactionInput } from "../db/queries.js";
 
 export const importRoutes = new Hono();
@@ -50,6 +50,8 @@ function parseCsv(text: string): string[][] {
 
 const previewSchema = z.object({ csv: z.string().min(1) });
 
+// Returns the first rows raw; the client decides whether row 0 is a header
+// (some banks, e.g. TD, export with no header row).
 importRoutes.post("/accounts/:id/import-preview", async (c) => {
   const parsed = previewSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
@@ -57,23 +59,27 @@ importRoutes.post("/accounts/:id/import-preview", async (c) => {
   const rows = parseCsv(parsed.data.csv);
   if (rows.length === 0) return c.json({ error: "CSV file is empty" }, 400);
 
-  const [headers, ...dataRows] = rows;
-  return c.json({ headers, rows: dataRows.slice(0, 5) });
+  const sample = rows.slice(0, 6);
+  return c.json({ rows: sample, columnCount: Math.max(...sample.map((r) => r.length)) });
 });
 
 const dateFormats = z.enum(["YMD", "MDY", "DMY"]);
 
+const mappingSchema = z.object({
+  dateCol: z.number().int().min(0),
+  nameCol: z.number().int().min(0),
+  amountCol: z.number().int().min(0).optional(),
+  debitCol: z.number().int().min(0).optional(),
+  creditCol: z.number().int().min(0).optional(),
+  balanceCol: z.number().int().min(0).optional(),
+  dateFormat: dateFormats,
+  flipSign: z.boolean().optional(),
+  hasHeader: z.boolean().default(true),
+});
+
 const importSchema = z.object({
-  csv: z.string().min(1),
-  mapping: z.object({
-    dateCol: z.number().int().min(0),
-    nameCol: z.number().int().min(0),
-    amountCol: z.number().int().min(0).optional(),
-    debitCol: z.number().int().min(0).optional(),
-    creditCol: z.number().int().min(0).optional(),
-    dateFormat: dateFormats,
-    flipSign: z.boolean().optional(),
-  }),
+  csvs: z.array(z.string().min(1)).min(1),
+  mapping: mappingSchema,
 });
 
 // Normalizes a variety of common bank export date formats to YYYY-MM-DD.
@@ -107,44 +113,94 @@ function parseAmount(raw: string): number {
   return Number(raw.replace(/[^0-9.\-]/g, "")) || 0;
 }
 
+// Like parseAmount, but distinguishes an empty cell from a real 0.
+function parseOptionalAmount(raw: string | undefined): number | null {
+  if (!raw || !/\d/.test(raw)) return null;
+  const n = Number(raw.replace(/[^0-9.\-]/g, ""));
+  return Number.isNaN(n) ? null : n;
+}
+
+const DEBT_TYPES = new Set(["credit", "loan"]);
+
 importRoutes.post("/accounts/:id/import", async (c) => {
   const accountId = c.req.param("id");
   const parsed = importSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
 
-  const { csv, mapping } = parsed.data;
-  const rows = parseCsv(csv);
-  if (rows.length < 2) return c.json({ error: "CSV file has no data rows" }, 400);
-  const dataRows = rows.slice(1); // skip header
+  const [account] = await query<{ type: string }>(`SELECT type FROM accounts WHERE account_id = $1`, [accountId]);
+  if (!account) return c.json({ error: "Account not found" }, 404);
 
+  const { csvs, mapping } = parsed.data;
   const toImport: TransactionInput[] = [];
-  const skipped: number[] = [];
+  let skipped = 0;
+  // Most recent running balance seen across all files, if a balance column is mapped.
+  let latest: { date: string; balance: number } | null = null;
 
-  dataRows.forEach((row, i) => {
-    const date = normalizeDate(row[mapping.dateCol] ?? "", mapping.dateFormat);
-    const name = (row[mapping.nameCol] ?? "").trim() || null;
-    if (!date) {
-      skipped.push(i);
-      return;
+  for (const csv of csvs) {
+    const rows = parseCsv(csv);
+    const dataRows = mapping.hasHeader ? rows.slice(1) : rows;
+
+    const parsedRows: Array<{ date: string; balance: number | null }> = [];
+    for (const row of dataRows) {
+      const date = normalizeDate(row[mapping.dateCol] ?? "", mapping.dateFormat);
+      const name = (row[mapping.nameCol] ?? "").trim() || null;
+      if (!date) {
+        skipped++;
+        continue;
+      }
+
+      let amount: number;
+      if (mapping.debitCol !== undefined || mapping.creditCol !== undefined) {
+        const debit = mapping.debitCol !== undefined ? parseAmount(row[mapping.debitCol] ?? "") : 0;
+        const credit = mapping.creditCol !== undefined ? parseAmount(row[mapping.creditCol] ?? "") : 0;
+        amount = debit - credit;
+      } else {
+        amount = parseAmount(row[mapping.amountCol ?? -1] ?? "");
+        if (mapping.flipSign) amount = -amount;
+      }
+
+      toImport.push({ accountId, name, amount, date, isoCurrency: null, category: null });
+      const balance = mapping.balanceCol !== undefined ? parseOptionalAmount(row[mapping.balanceCol]) : null;
+      parsedRows.push({ date, balance });
     }
 
-    let amount: number;
-    if (mapping.debitCol !== undefined || mapping.creditCol !== undefined) {
-      const debit = mapping.debitCol !== undefined ? parseAmount(row[mapping.debitCol] ?? "") : 0;
-      const credit = mapping.creditCol !== undefined ? parseAmount(row[mapping.creditCol] ?? "") : 0;
-      amount = debit - credit;
-    } else {
-      amount = parseAmount(row[mapping.amountCol ?? -1] ?? "");
-      if (mapping.flipSign) amount = -amount;
+    // Banks list rows newest-first or oldest-first. Walk in chronological
+    // order so that, for same-day rows, the last one seen is that day's
+    // closing balance.
+    const first = parsedRows[0];
+    const last = parsedRows[parsedRows.length - 1];
+    const chronological = first && last && first.date > last.date ? [...parsedRows].reverse() : parsedRows;
+    for (const r of chronological) {
+      if (r.balance !== null && (!latest || r.date >= latest.date)) latest = { date: r.date, balance: r.balance };
     }
+  }
 
-    toImport.push({ accountId, name, amount, date, isoCurrency: null, category: null });
-  });
+  if (toImport.length === 0) {
+    return c.json({ error: "No rows with a valid date — check the date column and format" }, 400);
+  }
+
+  // Debts are stored as a positive amount owed, whatever sign the bank uses.
+  const newBalance = latest ? (DEBT_TYPES.has(account.type) ? Math.abs(latest.balance) : latest.balance) : null;
 
   // One transaction so a failed import leaves no partial rows behind.
   await withTransaction(async (client) => {
     for (const t of toImport) await upsertTransaction(t, client);
+    await client.query(
+      `UPDATE accounts
+       SET import_mapping = $1,
+           current_balance = COALESCE($2, current_balance),
+           updated_at = now()
+       WHERE account_id = $3`,
+      [JSON.stringify(mapping), newBalance, accountId],
+    );
   });
 
-  return c.json({ imported: toImport.length, skipped: skipped.length, accountId });
+  return c.json({
+    imported: toImport.length,
+    skipped,
+    files: csvs.length,
+    balance: newBalance,
+    balanceDate: latest?.date ?? null,
+    accountId,
+  });
 });

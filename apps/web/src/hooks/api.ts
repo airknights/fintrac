@@ -90,9 +90,9 @@ export function useImportPreview() {
 export function useImportTransactions() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { accountId: string; csv: string; mapping: ImportMapping }) =>
+    mutationFn: (payload: { accountId: string; csvs: string[]; mapping: ImportMapping }) =>
       api.post<ImportResult>(`/accounts/${payload.accountId}/import`, {
-        csv: payload.csv,
+        csvs: payload.csvs,
         mapping: payload.mapping,
       }),
     onSuccess: () => invalidateAll(qc),

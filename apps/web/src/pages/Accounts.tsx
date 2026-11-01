@@ -1,5 +1,5 @@
-import { useState, type ChangeEvent, type FormEvent } from "react";
-import type { Account, ImportMapping } from "../api/client.js";
+import { Fragment, useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import type { Account, ImportMapping, ImportResult } from "../api/client.js";
 import {
   useAccounts,
   useCreateAccount,
@@ -8,9 +8,11 @@ import {
   useImportTransactions,
   useUpdateBalance,
 } from "../hooks/api.js";
-import { titleCase } from "../format.js";
+import { money, titleCase } from "../format.js";
+import { DEBT_TYPES, INSTITUTIONS, groupByInstitution } from "../accounts.js";
 
 const TYPES = ["depository", "credit", "loan", "investment", "other"];
+const OTHER_INSTITUTION = "__other__";
 
 export function Accounts() {
   const { data } = useAccounts();
@@ -41,8 +43,17 @@ export function Accounts() {
               </tr>
             </thead>
             <tbody>
-              {accounts.map((a) => (
-                <AccountRow key={a.account_id} account={a} />
+              {groupByInstitution(accounts).map((g) => (
+                <Fragment key={g.institution}>
+                  <tr className="group-row">
+                    <td colSpan={2}>{g.institution}</td>
+                    <td className={`right ${g.net < 0 ? "neg" : ""}`}>{money(g.net)}</td>
+                    <td></td>
+                  </tr>
+                  {g.accounts.map((a) => (
+                    <AccountRow key={a.account_id} account={a} />
+                  ))}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -55,7 +66,9 @@ export function Accounts() {
 function AddAccountForm() {
   const create = useCreateAccount();
   const [name, setName] = useState("");
-  const [institutionName, setInstitutionName] = useState("");
+  const [institutionChoice, setInstitutionChoice] = useState(""); // a listed bank, OTHER_INSTITUTION, or "" for none
+  const [otherInstitution, setOtherInstitution] = useState("");
+  const institutionName = institutionChoice === OTHER_INSTITUTION ? otherInstitution : institutionChoice;
   const [type, setType] = useState("depository");
   const [subtype, setSubtype] = useState("");
   const [openingBalance, setOpeningBalance] = useState("0");
@@ -73,8 +86,8 @@ function AddAccountForm() {
       },
       {
         onSuccess: () => {
+          // Keep the institution selected: several accounts in a row are often at the same bank.
           setName("");
-          setInstitutionName("");
           setSubtype("");
           setOpeningBalance("0");
         },
@@ -98,13 +111,28 @@ function AddAccountForm() {
         </label>
         <label>
           Institution{" "}
-          <input
-            type="text"
-            value={institutionName}
-            onChange={(e) => setInstitutionName(e.target.value)}
-            placeholder="TD Canada Trust"
-          />
+          <select value={institutionChoice} onChange={(e) => setInstitutionChoice(e.target.value)}>
+            <option value="">choose…</option>
+            {INSTITUTIONS.map((i) => (
+              <option key={i} value={i}>
+                {i}
+              </option>
+            ))}
+            <option value={OTHER_INSTITUTION}>Other…</option>
+          </select>
         </label>
+        {institutionChoice === OTHER_INSTITUTION && (
+          <label>
+            Institution name{" "}
+            <input
+              type="text"
+              value={otherInstitution}
+              onChange={(e) => setOtherInstitution(e.target.value)}
+              placeholder="e.g. RBC"
+              autoFocus
+            />
+          </label>
+        )}
         <label>
           Type{" "}
           <select value={type} onChange={(e) => setType(e.target.value)}>
@@ -145,13 +173,13 @@ function AccountRow({ account }: { account: Account }) {
   const [balance, setBalance] = useState(String(account.current_balance ?? 0));
   const [importing, setImporting] = useState(false);
 
+  // Pick up balance changes made elsewhere (e.g. set from an imported CSV).
+  useEffect(() => setBalance(String(account.current_balance ?? 0)), [account.current_balance]);
+
   return (
     <>
       <tr>
-        <td>
-          {account.name}
-          {account.institution_name && <span className="muted"> · {account.institution_name}</span>}
-        </td>
+        <td>{account.name}</td>
         <td>{titleCase(account.subtype ?? account.type)}</td>
         <td className="right">
           <input
@@ -186,7 +214,7 @@ function AccountRow({ account }: { account: Account }) {
       {importing && (
         <tr>
           <td colSpan={4}>
-            <ImportPanel accountId={account.account_id} onDone={() => setImporting(false)} />
+            <ImportPanel account={account} onDone={() => setImporting(false)} />
           </td>
         </tr>
       )}
@@ -194,49 +222,92 @@ function AccountRow({ account }: { account: Account }) {
   );
 }
 
-function ImportPanel({ accountId, onDone }: { accountId: string; onDone: () => void }) {
-  const [csv, setCsv] = useState<string | null>(null);
-  const [fileName, setFileName] = useState("");
-  const [amountMode, setAmountMode] = useState<"single" | "split">("single");
-  const [mapping, setMapping] = useState<Partial<ImportMapping>>({ dateFormat: "YMD" });
-  const [result, setResult] = useState<{ imported: number; skipped: number } | null>(null);
+function ImportPanel({ account, onDone }: { account: Account; onDone: () => void }) {
+  const accountId = account.account_id;
+  const saved = account.import_mapping;
+  const [csvs, setCsvs] = useState<string[]>([]);
+  const [fileNames, setFileNames] = useState<string[]>([]);
+  const [amountMode, setAmountMode] = useState<"single" | "split">(
+    saved && (saved.debitCol !== undefined || saved.creditCol !== undefined) ? "split" : "single",
+  );
+  const [mapping, setMapping] = useState<Partial<ImportMapping>>(saved ?? { dateFormat: "YMD", hasHeader: true });
+  const [result, setResult] = useState<ImportResult | null>(null);
   const preview = useImportPreview();
   const doImport = useImportTransactions();
 
-  function handleFile(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setFileName(file.name);
+  async function handleFiles(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
     setResult(null);
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = String(reader.result ?? "");
-      setCsv(text);
-      preview.mutate({ accountId, csv: text });
-    };
-    reader.readAsText(file);
+    const texts = await Promise.all(files.map((f) => f.text()));
+    setFileNames(files.map((f) => f.name));
+    setCsvs(texts);
+    // Files from the same bank share a layout, so previewing the first is enough.
+    preview.mutate({ accountId, csv: texts[0]! });
   }
+
+  const mappingComplete =
+    mapping.dateCol !== undefined &&
+    mapping.nameCol !== undefined &&
+    (amountMode === "single"
+      ? mapping.amountCol !== undefined
+      : mapping.debitCol !== undefined || mapping.creditCol !== undefined);
 
   function handleImport() {
-    if (!csv || mapping.dateCol === undefined || mapping.nameCol === undefined) return;
-    if (amountMode === "single" && mapping.amountCol === undefined) return;
-    if (amountMode === "split" && mapping.debitCol === undefined && mapping.creditCol === undefined) return;
-    doImport.mutate(
-      { accountId, csv, mapping: mapping as ImportMapping },
-      { onSuccess: (r) => setResult(r) },
-    );
+    if (csvs.length === 0 || !mappingComplete) return;
+    doImport.mutate({ accountId, csvs, mapping: mapping as ImportMapping }, { onSuccess: (r) => setResult(r) });
   }
 
-  const headers = preview.data?.headers ?? [];
+  const hasHeader = mapping.hasHeader ?? true;
+  const rawRows = preview.data?.rows ?? [];
+  const columnCount = preview.data?.columnCount ?? 0;
+  const headers = hasHeader
+    ? Array.from({ length: columnCount }, (_, i) => rawRows[0]?.[i] || `Column ${i + 1}`)
+    : Array.from({ length: columnCount }, (_, i) => `Column ${i + 1}`);
+  const sampleRows = hasHeader ? rawRows.slice(1) : rawRows.slice(0, 5);
+
+  // Plain-language column names instead of bank jargon (debit/credit).
+  const isDebt = DEBT_TYPES.has(account.type);
+  const moneyOutSelect = (label: string) => (
+    <ColSelect
+      label={label}
+      headers={headers}
+      value={mapping.debitCol}
+      onChange={(v) => setMapping((m) => ({ ...m, debitCol: v, amountCol: undefined }))}
+    />
+  );
+  const moneyInSelect = (label: string) => (
+    <ColSelect
+      label={label}
+      headers={headers}
+      value={mapping.creditCol}
+      onChange={(v) => setMapping((m) => ({ ...m, creditCol: v, amountCol: undefined }))}
+    />
+  );
 
   return (
     <div className="card">
       <h3>Import transactions</h3>
-      <input type="file" accept=".csv,text/csv" onChange={handleFile} />
-      {fileName && <p className="muted">{fileName}</p>}
+      <input type="file" accept=".csv,text/csv" multiple onChange={handleFiles} />
+      {fileNames.length > 0 && (
+        <p className="muted">
+          {fileNames.length === 1 ? fileNames[0] : `${fileNames.length} files: ${fileNames.join(", ")}`}
+        </p>
+      )}
+      {saved && fileNames.length === 0 && (
+        <p className="muted">Using the column mapping from your last import — pick files and click Import.</p>
+      )}
 
-      {headers.length > 0 && (
+      {columnCount > 0 && (
         <>
+          <label>
+            <input
+              type="checkbox"
+              checked={hasHeader}
+              onChange={(e) => setMapping((m) => ({ ...m, hasHeader: e.target.checked }))}
+            />{" "}
+            First row is column headers
+          </label>
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead>
@@ -247,7 +318,7 @@ function ImportPanel({ accountId, onDone }: { accountId: string; onDone: () => v
                 </tr>
               </thead>
               <tbody>
-                {preview.data!.rows.map((row, i) => (
+                {sampleRows.map((row, i) => (
                   <tr key={i}>
                     {row.map((cell, j) => (
                       <td key={j}>{cell}</td>
@@ -290,8 +361,8 @@ function ImportPanel({ accountId, onDone }: { accountId: string; onDone: () => v
               amount column
             </label>{" "}
             <label style={{ marginLeft: 16 }}>
-              <input type="radio" checked={amountMode === "split"} onChange={() => setAmountMode("split")} /> Separate
-              debit/credit columns
+              <input type="radio" checked={amountMode === "split"} onChange={() => setAmountMode("split")} />{" "}
+              {isDebt ? "Separate columns for money spent and payments" : "Separate columns for deposits and withdrawals"}
             </label>
           </div>
 
@@ -313,25 +384,35 @@ function ImportPanel({ accountId, onDone }: { accountId: string; onDone: () => v
               </label>
             </div>
           ) : (
+            // Under the hood "out" maps to debitCol and "in" to creditCol.
             <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
-              <ColSelect
-                label="Debit column"
-                headers={headers}
-                value={mapping.debitCol}
-                onChange={(v) => setMapping((m) => ({ ...m, debitCol: v, amountCol: undefined }))}
-              />
-              <ColSelect
-                label="Credit column"
-                headers={headers}
-                value={mapping.creditCol}
-                onChange={(v) => setMapping((m) => ({ ...m, creditCol: v, amountCol: undefined }))}
-              />
+              {isDebt ? (
+                <>
+                  {moneyOutSelect("Money spent")}
+                  {moneyInSelect("Payment made")}
+                </>
+              ) : (
+                <>
+                  {moneyInSelect("Money deposited")}
+                  {moneyOutSelect("Money withdrawn")}
+                </>
+              )}
             </div>
           )}
 
+          <div style={{ marginTop: 8 }}>
+            <ColSelect
+              label="Balance column (optional — sets the account balance from the newest row)"
+              headers={headers}
+              value={mapping.balanceCol}
+              onChange={(v) => setMapping((m) => ({ ...m, balanceCol: v }))}
+              allowNone
+            />
+          </div>
+
           <div style={{ marginTop: 14 }}>
-            <button className="btn primary" onClick={handleImport} disabled={doImport.isPending}>
-              {doImport.isPending ? "Importing…" : "Import"}
+            <button className="btn primary" onClick={handleImport} disabled={doImport.isPending || !mappingComplete}>
+              {doImport.isPending ? "Importing…" : csvs.length > 1 ? `Import ${csvs.length} files` : "Import"}
             </button>{" "}
             <button className="btn" onClick={onDone}>
               Cancel
@@ -343,7 +424,9 @@ function ImportPanel({ accountId, onDone }: { accountId: string; onDone: () => v
       {result && (
         <p className="muted">
           Imported {result.imported} transaction(s)
+          {result.files > 1 && ` from ${result.files} files`}
           {result.skipped > 0 && `, skipped ${result.skipped} row(s) with an unparseable date`}.
+          {result.balance !== null && ` Balance set to ${money(result.balance)} (as of ${result.balanceDate}).`}
         </p>
       )}
       {preview.error && <p className="error">{(preview.error as Error).message}</p>}
@@ -357,18 +440,23 @@ function ColSelect({
   headers,
   value,
   onChange,
+  allowNone = false,
 }: {
   label: string;
   headers: string[];
   value: number | undefined;
-  onChange: (v: number) => void;
+  onChange: (v: number | undefined) => void;
+  allowNone?: boolean;
 }) {
   return (
     <label>
       {label}:{" "}
-      <select value={value ?? ""} onChange={(e) => onChange(Number(e.target.value))}>
-        <option value="" disabled>
-          choose…
+      <select
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value === "" ? undefined : Number(e.target.value))}
+      >
+        <option value="" disabled={!allowNone}>
+          {allowNone ? "none" : "choose…"}
         </option>
         {headers.map((h, i) => (
           <option key={i} value={i}>

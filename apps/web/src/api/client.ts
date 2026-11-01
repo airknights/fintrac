@@ -30,6 +30,7 @@ export interface Account {
   subtype: string | null;
   current_balance: number | null;
   iso_currency: string;
+  import_mapping: ImportMapping | null; // saved from the last CSV import
 }
 
 export interface NetWorth {
@@ -78,8 +79,8 @@ export interface DebtPlanResponse {
 }
 
 export interface ImportPreview {
-  headers: string[];
-  rows: string[][];
+  rows: string[][]; // first rows of the file, raw (row 0 may or may not be a header)
+  columnCount: number;
 }
 
 export interface ImportMapping {
@@ -88,12 +89,17 @@ export interface ImportMapping {
   amountCol?: number;
   debitCol?: number;
   creditCol?: number;
+  balanceCol?: number;
   dateFormat: "YMD" | "MDY" | "DMY";
   flipSign?: boolean;
+  hasHeader: boolean;
 }
 
 export interface ImportResult {
   imported: number;
   skipped: number;
+  files: number;
+  balance: number | null; // new current balance, if a balance column was mapped
+  balanceDate: string | null;
   accountId: string;
 }
