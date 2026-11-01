@@ -79,6 +79,9 @@ importRoutes.post("/accounts/:id/import-preview", async (c) => {
 
 const dateFormats = z.enum(["YMD", "MDY", "DMY"]);
 
+// A single cell in the info rows above the transactions (e.g. CTFS's summary).
+const cellRef = z.object({ row: z.number().int().min(0), col: z.number().int().min(0) });
+
 const mappingSchema = z.object({
   dateCol: z.number().int().min(0),
   nameCol: z.number().int().min(0),
@@ -87,6 +90,10 @@ const mappingSchema = z.object({
   creditCol: z.number().int().min(0).optional(),
   balanceCol: z.number().int().min(0).optional(),
   availableCol: z.number().int().min(0).optional(), // credit cards: available credit
+  // Single values from the info rows above the transactions; these win over columns.
+  summaryBalance: cellRef.optional(),
+  summaryAvailable: cellRef.optional(),
+  summaryDate: cellRef.optional(), // what date the summary balance is as of
   dateFormat: dateFormats,
   flipSign: z.boolean().optional(),
   // Row indexes (0-based, blank lines ignored). headerRow null = no header row.
@@ -163,10 +170,15 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   // running balance / available credit when those columns are mapped.
   type FileRow = { date: string; amount: number; balance: number | null; available: number | null };
   const files: FileRow[][] = [];
+  // Per file: values picked from the info rows above the transactions.
+  type Summary = { date: string | null; newestDate: string | null; balance: number | null; available: number | null };
+  const summaries: Summary[] = [];
 
   for (const csv of csvs) {
+    const allRows = parseCsv(csv);
+    const cell = (ref?: { row: number; col: number }) => (ref ? allRows[ref.row]?.[ref.col] : undefined);
     const parsedRows: Array<TransactionInput & { balance: number | null; available: number | null }> = [];
-    for (const row of parseCsv(csv).slice(dataStartRow(mapping))) {
+    for (const row of allRows.slice(dataStartRow(mapping))) {
       const date = normalizeDate(row[mapping.dateCol] ?? "", mapping.dateFormat);
       const name = (row[mapping.nameCol] ?? "").trim() || null;
       if (!date) {
@@ -196,6 +208,12 @@ importRoutes.post("/accounts/:id/import", async (c) => {
     const chronological = first && last && first.date > last.date ? parsedRows.reverse() : parsedRows;
     for (const { balance: _, available: __, ...t } of chronological) toImport.push(t);
     files.push(chronological.map((r) => ({ date: r.date, amount: r.amount, balance: r.balance, available: r.available })));
+    summaries.push({
+      date: mapping.summaryDate ? normalizeDate(cell(mapping.summaryDate) ?? "", mapping.dateFormat) : null,
+      newestDate: chronological[chronological.length - 1]?.date ?? null,
+      balance: parseOptionalAmount(cell(mapping.summaryBalance)),
+      available: parseOptionalAmount(cell(mapping.summaryAvailable)),
+    });
   }
 
   if (toImport.length === 0) {
@@ -210,23 +228,48 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   // How a transaction should move our balance (amount is + for money out).
   const delta = (amount: number) => (isDebt ? amount : -amount);
 
-  // Newest balance in the files becomes the account's anchor balance.
+  // A lone summary balance has no column to read the sign convention from;
+  // a card's balance owed is taken as a positive amount either way.
+  const summaryToOurBalance = (b: number) => (allBalances.length ? toOurBalance(b) : isDebt ? Math.abs(b) : b);
+
+  // Newest balance in the files becomes the account's anchor balance. A
+  // summary balance (as of its date cell, else the file's newest transaction)
+  // wins over the balance column.
   let latest: { date: string; balance: number } | null = null;
   for (const rows of files) {
     for (const r of rows) {
       if (r.balance !== null && (!latest || r.date >= latest.date)) latest = { date: r.date, balance: toOurBalance(r.balance) };
     }
   }
+  let latestSummary: { date: string; balance: number } | null = null;
+  for (const sm of summaries) {
+    const date = sm.date ?? sm.newestDate;
+    if (sm.balance !== null && date && (!latestSummary || date >= latestSummary.date)) {
+      latestSummary = { date, balance: summaryToOurBalance(sm.balance) };
+    }
+  }
+  if (latestSummary) latest = latestSummary;
 
   // Newest available credit in the files (credit cards only) sets the credit
-  // limit: available + balance owed at that row.
-  let latestAvailable: FileRow | null = null;
+  // limit: available + balance owed at that point. owed null = work it out
+  // from the account's balance on that date.
+  let latestAvailable: { date: string; available: number; owed: number | null } | null = null;
   if (account.type === "credit") {
     for (const rows of files) {
       for (const r of rows) {
-        if (r.available !== null && (!latestAvailable || r.date >= latestAvailable.date)) latestAvailable = r;
+        if (r.available !== null && (!latestAvailable || r.date >= latestAvailable.date)) {
+          latestAvailable = { date: r.date, available: r.available, owed: r.balance === null ? null : toOurBalance(r.balance) };
+        }
       }
     }
+    let fromSummary: typeof latestAvailable = null;
+    for (const sm of summaries) {
+      const date = sm.date ?? sm.newestDate;
+      if (sm.available !== null && date && (!fromSummary || date >= fromSummary.date)) {
+        fromSummary = { date, available: sm.available, owed: sm.balance === null ? null : summaryToOurBalance(sm.balance) };
+      }
+    }
+    if (fromSummary) latestAvailable = fromSummary;
   }
 
   // Balance check: each row's amount should explain the change in the bank's
@@ -270,8 +313,8 @@ importRoutes.post("/accounts/:id/import", async (c) => {
       // Balance owed at that row: from the file if it has one, otherwise the
       // account's balance at the end of that day.
       let owed: number;
-      if (latestAvailable.balance !== null) {
-        owed = toOurBalance(latestAvailable.balance);
+      if (latestAvailable.owed !== null) {
+        owed = latestAvailable.owed;
       } else {
         const { rows } = await client.query<{ owed: number }>(
           `SELECT a.current_balance - COALESCE(SUM(${DELTA_SQL}) FILTER (WHERE t.date > $2::date), 0) AS owed
@@ -282,7 +325,7 @@ importRoutes.post("/accounts/:id/import", async (c) => {
         );
         owed = rows[0]!.owed;
       }
-      creditLimit = Math.round((latestAvailable.available! + owed) * 100) / 100;
+      creditLimit = Math.round((latestAvailable.available + owed) * 100) / 100;
       await client.query(`UPDATE accounts SET credit_limit = $1 WHERE account_id = $2`, [creditLimit, accountId]);
     }
   });

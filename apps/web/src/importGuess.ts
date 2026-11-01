@@ -1,4 +1,4 @@
-import type { ImportMapping } from "./api/client.js";
+import type { CellRef, ImportMapping } from "./api/client.js";
 
 // Best-guess CSV import settings, so most files need no manual mapping.
 
@@ -20,9 +20,11 @@ const amountValue = (cell: string) => {
 // are all text, i.e. no dates or amounts. Account-info lines above the header
 // usually have only a cell or two. Returns null when the file has no header
 // (e.g. TD): only rows *before* the first transaction can be the header.
+// A short row with a date (e.g. CTFS's "Start Date / End Date" summary) isn't
+// a transaction.
 export function guessHeaderRow(rows: string[][], columnCount: number): number | null {
   const minFilled = Math.max(2, Math.ceil(columnCount * 0.6));
-  const firstData = rows.findIndex((r) => r.some(isDate));
+  const firstData = rows.findIndex((r) => r.some(isDate) && r.filter((c) => c.trim()).length >= minFilled);
   const candidates = firstData === -1 ? rows : rows.slice(0, firstData);
   const index = candidates.findIndex((r) => {
     const filled = r.filter((c) => c.trim());
@@ -146,4 +148,53 @@ export function guessColumns(
   }
 
   return g;
+}
+
+// ── Values in the info rows above the transactions ──────────────
+// e.g. CTFS:  Start Date | End Date   | Current Balance | Available Credit
+//             2026-07-23 | 2026-08-10 | 19959.32        | 40.68
+
+export interface SummaryCell extends CellRef {
+  label: string; // the text above (or left of) the value
+  value: string;
+  kind: "amount" | "date";
+}
+
+export function summaryCells(rows: string[][], headerRow: number | null, dataStartRow: number): SummaryCell[] {
+  const isLabel = (c: string | undefined) => !!c && c.trim() !== "" && !isDate(c) && !isAmount(c);
+  const cells: SummaryCell[] = [];
+  for (let row = 0; row < Math.min(dataStartRow, rows.length); row++) {
+    if (row === headerRow) continue;
+    rows[row]!.forEach((value, col) => {
+      const kind = isDate(value) ? "date" : isAmount(value) ? "amount" : null;
+      if (!kind) return;
+      const above = rows[row - 1]?.[col];
+      const left = rows[row]![col - 1];
+      const label = isLabel(above) ? above!.trim() : isLabel(left) ? left!.trim() : `Row ${row + 1}, column ${col + 1}`;
+      cells.push({ row, col, label, value: value.trim(), kind });
+    });
+  }
+  return cells;
+}
+
+export function guessSummary(
+  cells: SummaryCell[],
+  { creditCard = false }: { creditCard?: boolean } = {},
+): Pick<ImportMapping, "summaryBalance" | "summaryAvailable" | "summaryDate"> {
+  const pick = (kind: SummaryCell["kind"], patterns: RegExp[], skip?: SummaryCell) => {
+    for (const p of patterns) {
+      const c = cells.find((x) => x.kind === kind && x !== skip && p.test(x.label));
+      if (c) return c;
+    }
+    return undefined;
+  };
+  const ref = (c?: SummaryCell) => (c ? { row: c.row, col: c.col } : undefined);
+  const available = creditCard ? pick("amount", [/available/i]) : undefined;
+  const balance = pick(
+    "amount",
+    [/(current|new|closing|statement|ending) balance/i, /^(?!.*available).*balance/i],
+    available,
+  );
+  const date = pick("date", [/end(ing)? date|as of|statement date|closing date|balance date/i]);
+  return { summaryBalance: ref(balance), summaryAvailable: ref(available), summaryDate: ref(date) };
 }

@@ -87,6 +87,11 @@ export interface ImportPreview {
   columnCount: number;
 }
 
+export interface CellRef {
+  row: number;
+  col: number;
+}
+
 export interface ImportMapping {
   dateCol: number;
   nameCol: number;
@@ -95,6 +100,10 @@ export interface ImportMapping {
   creditCol?: number;
   balanceCol?: number;
   availableCol?: number; // credit cards: available credit
+  // Single values from the info rows above the transactions; these win over columns.
+  summaryBalance?: CellRef;
+  summaryAvailable?: CellRef;
+  summaryDate?: CellRef; // what date the summary balance is as of
   dateFormat: "YMD" | "MDY" | "DMY";
   flipSign?: boolean;
   // Row indexes into the file (0-based, blank lines ignored). headerRow null = no header row.

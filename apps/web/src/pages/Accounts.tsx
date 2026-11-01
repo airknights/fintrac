@@ -13,7 +13,7 @@ import {
 import { money, titleCase } from "../format.js";
 import { DEBT_TYPES, groupByInstitution, inferAccountKind, inferInstitution } from "../accounts.js";
 import { InstitutionPicker } from "../components/InstitutionPicker.js";
-import { guessColumns, guessHeaderRow } from "../importGuess.js";
+import { guessColumns, guessHeaderRow, guessSummary, summaryCells, type SummaryCell } from "../importGuess.js";
 
 const TYPES = ["depository", "credit", "loan", "investment", "other"];
 
@@ -407,8 +407,9 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       columnCount,
       { creditCard: account.type === "credit" },
     );
+    const summary = guessSummary(summaryCells(rows, header, dataStart), { creditCard: account.type === "credit" });
     setAmountMode(mode);
-    setMapping((m) => ({ dateFormat: m.dateFormat, ...cols, headerRow: header, dataStartRow: dataStart }));
+    setMapping((m) => ({ dateFormat: m.dateFormat, ...cols, ...summary, headerRow: header, dataStartRow: dataStart }));
     setColumnsGuessed(true);
   }
   const doImport = useImportTransactions();
@@ -425,8 +426,19 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       { accountId, csv: texts[0]! },
       {
         onSuccess: (data) => {
-          if (saved) return; // keep the settings the user chose last time
-          applyGuess(data.rows, data.columnCount, guessHeaderRow(data.rows, data.columnCount));
+          if (!saved) {
+            applyGuess(data.rows, data.columnCount, guessHeaderRow(data.rows, data.columnCount));
+            return;
+          }
+          // Keep the settings the user chose last time, but fill in summary
+          // values (balance etc. above the transactions) if they were never picked.
+          if (saved.summaryBalance || saved.summaryAvailable || saved.summaryDate) return;
+          setMapping((m) => {
+            const header = m.headerRow !== undefined ? m.headerRow : m.hasHeader === false ? null : 0;
+            const start = m.dataStartRow ?? (header === null ? 0 : header + 1);
+            const cells = summaryCells(data.rows, header, start);
+            return { ...m, ...guessSummary(cells, { creditCard: account.type === "credit" }) };
+          });
         },
       },
     );
@@ -471,6 +483,9 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
     setWindowEnd(end);
     setWindowStart((start) => Math.max(start, end - PREVIEW_MAX_VISIBLE)); // drop rows off the top
   }
+
+  // Single values (balance, available credit, dates) in the rows above the transactions.
+  const infoCells = summaryCells(rawRows, headerRow, dataStartRow);
 
   const rowLabel = (i: number) => {
     const text = (rawRows[i] ?? []).filter((c) => c.trim()).slice(0, 3).join(" · ");
@@ -700,6 +715,36 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
             </div>
           )}
 
+          {infoCells.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <strong>From the info above the transactions</strong>{" "}
+              <span className="muted">(used instead of the columns above when set)</span>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 6 }}>
+                <CellSelect
+                  label="Current balance"
+                  cells={infoCells.filter((c) => c.kind === "amount")}
+                  value={mapping.summaryBalance}
+                  onChange={(v) => setMapping((m) => ({ ...m, summaryBalance: v }))}
+                />
+                {account.type === "credit" && (
+                  <CellSelect
+                    label="Available credit"
+                    cells={infoCells.filter((c) => c.kind === "amount")}
+                    value={mapping.summaryAvailable}
+                    onChange={(v) => setMapping((m) => ({ ...m, summaryAvailable: v }))}
+                  />
+                )}
+                <CellSelect
+                  label="Balance as of"
+                  cells={infoCells.filter((c) => c.kind === "date")}
+                  value={mapping.summaryDate}
+                  onChange={(v) => setMapping((m) => ({ ...m, summaryDate: v }))}
+                  noneLabel="newest transaction in the file"
+                />
+              </div>
+            </div>
+          )}
+
           <div style={{ marginTop: 14 }}>
             <button className="btn primary" onClick={handleImport} disabled={doImport.isPending || !mappingComplete}>
               {doImport.isPending ? "Importing…" : csvs.length > 1 ? `Import ${csvs.length} files` : "Import"}
@@ -740,6 +785,42 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       {preview.error && <p className="error">{(preview.error as Error).message}</p>}
       {doImport.error && <p className="error">{(doImport.error as Error).message}</p>}
     </div>
+  );
+}
+
+// Picks one value from the info rows above the transactions.
+function CellSelect({
+  label,
+  cells,
+  value,
+  onChange,
+  noneLabel = "none",
+}: {
+  label: string;
+  cells: SummaryCell[];
+  value: { row: number; col: number } | undefined;
+  onChange: (v: { row: number; col: number } | undefined) => void;
+  noneLabel?: string;
+}) {
+  return (
+    <label>
+      {label}:{" "}
+      <select
+        value={value ? `${value.row}:${value.col}` : ""}
+        onChange={(e) => {
+          if (!e.target.value) return onChange(undefined);
+          const [row, col] = e.target.value.split(":").map(Number);
+          onChange({ row: row!, col: col! });
+        }}
+      >
+        <option value="">{noneLabel}</option>
+        {cells.map((c) => (
+          <option key={`${c.row}:${c.col}`} value={`${c.row}:${c.col}`}>
+            {c.label}: {c.value}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
