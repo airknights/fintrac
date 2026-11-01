@@ -1,6 +1,6 @@
-export function money(n: number | null | undefined, currency = "USD"): string {
+export function money(n: number | null | undefined): string {
   if (n == null) return "—";
-  return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(n);
+  return new Intl.NumberFormat("en-CA", { style: "currency", currency: "CAD" }).format(n);
 }
 
 export function months(n: number): string {

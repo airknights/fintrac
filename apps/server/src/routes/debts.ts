@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { db } from "../db/index.js";
+import { query } from "../db/index.js";
 import { setDebtOverride } from "../db/queries.js";
 import { buildDebtPlan, type Debt } from "../services/debtPlanner.js";
 
@@ -16,9 +16,8 @@ interface DebtRow {
 
 // All credit/loan accounts, with APR + minimum from manual overrides.
 // Balance is the amount owed (positive).
-function loadDebtRows(): DebtRow[] {
-  return db
-    .prepare(
+function loadDebtRows(): Promise<DebtRow[]> {
+  return query<DebtRow>(
       `SELECT a.account_id,
               COALESCE(a.name, 'Account') AS name,
               COALESCE(a.current_balance, 0) AS balance,
@@ -28,12 +27,11 @@ function loadDebtRows(): DebtRow[] {
        LEFT JOIN debt_overrides o ON o.account_id = a.account_id
        WHERE a.type IN ('credit','loan')
        ORDER BY balance DESC`,
-    )
-    .all() as unknown as DebtRow[];
+  );
 }
 
-debtRoutes.get("/debts", (c) => {
-  const rows = loadDebtRows();
+debtRoutes.get("/debts", async (c) => {
+  const rows = await loadDebtRows();
   const debts = rows.map((r) => ({
     accountId: r.account_id,
     name: r.name,
@@ -56,7 +54,7 @@ debtRoutes.post("/debts/:accountId/override", async (c) => {
   const accountId = c.req.param("accountId");
   const parsed = overrideSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
-  setDebtOverride(accountId, parsed.data.apr ?? null, parsed.data.minimum ?? null);
+  await setDebtOverride(accountId, parsed.data.apr ?? null, parsed.data.minimum ?? null);
   return c.json({ ok: true });
 });
 
@@ -69,7 +67,7 @@ debtRoutes.post("/debt-plan", async (c) => {
     return c.json({ error: "monthlyBudget (positive number) is required" }, 400);
   }
 
-  const rows = loadDebtRows().filter((r) => r.balance > 0);
+  const rows = (await loadDebtRows()).filter((r) => r.balance > 0);
   const usable: Debt[] = [];
   const needsInput: Array<{ accountId: string; name: string; balance: number }> = [];
 

@@ -28,7 +28,7 @@ export function AccountList() {
                 <td>{titleCase(a.subtype ?? a.type)}</td>
                 <td className={`right ${isDebt ? "neg" : ""}`}>
                   {isDebt ? "−" : ""}
-                  {money(a.current_balance, a.iso_currency)}
+                  {money(a.current_balance)}
                 </td>
               </tr>
             );

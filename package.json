@@ -8,10 +8,14 @@
     "apps/web"
   ],
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev": "npm run db:up && concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "npm run dev --workspace apps/server",
     "dev:web": "npm run dev --workspace apps/web",
-    "build": "npm run build --workspace apps/web"
+    "build": "npm run build --workspace apps/web",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose down",
+    "db:migrate": "npm run db:migrate --workspace apps/server --",
+    "db:psql": "docker compose exec postgres psql -U fintrac -d fintrac"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

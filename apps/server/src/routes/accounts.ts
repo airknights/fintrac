@@ -7,8 +7,8 @@ export const accountRoutes = new Hono();
 const ASSET_TYPES = new Set(["depository", "investment", "brokerage", "other"]);
 const DEBT_TYPES = new Set(["credit", "loan"]);
 
-accountRoutes.get("/accounts", (c) => {
-  return c.json({ accounts: getAccounts() });
+accountRoutes.get("/accounts", async (c) => {
+  return c.json({ accounts: await getAccounts() });
 });
 
 const createSchema = z.object({
@@ -23,7 +23,7 @@ const createSchema = z.object({
 accountRoutes.post("/accounts", async (c) => {
   const parsed = createSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
-  const accountId = createAccount(parsed.data);
+  const accountId = await createAccount(parsed.data);
   return c.json({ accountId });
 });
 
@@ -32,18 +32,18 @@ const balanceSchema = z.object({ balance: z.number() });
 accountRoutes.patch("/accounts/:id/balance", async (c) => {
   const parsed = balanceSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
-  updateAccountBalance(c.req.param("id"), parsed.data.balance);
+  await updateAccountBalance(c.req.param("id"), parsed.data.balance);
   return c.json({ ok: true });
 });
 
-accountRoutes.delete("/accounts/:id", (c) => {
-  deleteAccount(c.req.param("id"));
+accountRoutes.delete("/accounts/:id", async (c) => {
+  await deleteAccount(c.req.param("id"));
   return c.json({ ok: true });
 });
 
 // Net worth = assets - debts. Credit/loan balances are positive amounts owed.
-accountRoutes.get("/net-worth", (c) => {
-  const accounts = getAccounts();
+accountRoutes.get("/net-worth", async (c) => {
+  const accounts = await getAccounts();
   let assets = 0;
   let debts = 0;
   for (const a of accounts) {

@@ -58,7 +58,6 @@ function AddAccountForm() {
   const [institutionName, setInstitutionName] = useState("");
   const [type, setType] = useState("depository");
   const [subtype, setSubtype] = useState("");
-  const [currency, setCurrency] = useState("USD");
   const [openingBalance, setOpeningBalance] = useState("0");
 
   function handleSubmit(e: FormEvent) {
@@ -70,7 +69,6 @@ function AddAccountForm() {
         institutionName: institutionName.trim() || null,
         type,
         subtype: subtype.trim() || null,
-        isoCurrency: currency,
         openingBalance: Number(openingBalance) || 0,
       },
       {
@@ -120,13 +118,6 @@ function AddAccountForm() {
         <label>
           Subtype{" "}
           <input type="text" value={subtype} onChange={(e) => setSubtype(e.target.value)} placeholder="chequing" />
-        </label>
-        <label>
-          Currency{" "}
-          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
-            <option value="USD">USD</option>
-            <option value="CAD">CAD</option>
-          </select>
         </label>
         <label>
           Opening balance{" "}

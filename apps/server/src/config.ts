@@ -14,6 +14,8 @@ if (existsSync(rootEnv)) dotenv.config({ path: rootEnv });
 
 const schema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
+  // Matches docker-compose.yml at the repo root.
+  DATABASE_URL: z.string().url().default("postgres://fintrac:fintrac@localhost:5433/fintrac"),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -25,5 +27,3 @@ if (!parsed.success) {
 }
 
 export const config = parsed.data;
-export const dataDir = resolve(serverRoot, "data");
-export const dbPath = resolve(dataDir, "fintrac.db");

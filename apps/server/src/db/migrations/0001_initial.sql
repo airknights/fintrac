@@ -1,6 +1,4 @@
--- fintrac local schema. Applied on boot (idempotent).
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+-- Initial schema. IF NOT EXISTS so it also adopts databases created before migrations existed.
 
 CREATE TABLE IF NOT EXISTS accounts (
   account_id         TEXT PRIMARY KEY,
@@ -8,9 +6,9 @@ CREATE TABLE IF NOT EXISTS accounts (
   institution_name   TEXT,
   type               TEXT NOT NULL,   -- depository | credit | loan | investment | other
   subtype            TEXT,
-  current_balance    REAL DEFAULT 0,
-  iso_currency       TEXT DEFAULT 'USD',
-  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  current_balance    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  iso_currency       TEXT NOT NULL DEFAULT 'CAD',
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -18,20 +16,19 @@ CREATE TABLE IF NOT EXISTS transactions (
   account_id      TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
   name            TEXT,
   merchant_name   TEXT,
-  amount          REAL NOT NULL,     -- positive = outflow (spending)
-  iso_currency    TEXT DEFAULT 'USD',
-  date            TEXT NOT NULL,     -- YYYY-MM-DD
+  amount          NUMERIC(14,2) NOT NULL,  -- positive = outflow (spending)
+  iso_currency    TEXT NOT NULL DEFAULT 'CAD',
+  date            DATE NOT NULL,
   category        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_tx_category ON transactions(category);
 CREATE INDEX IF NOT EXISTS idx_tx_account ON transactions(account_id);
 
--- Manually-entered APR / minimum payment for debt accounts (the only source
--- now that there's no Plaid liabilities data).
+-- Manually-entered APR / minimum payment for debt accounts.
 CREATE TABLE IF NOT EXISTS debt_overrides (
   account_id       TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
-  apr_percentage   REAL,
-  minimum_payment  REAL,
-  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  apr_percentage   NUMERIC(6,3),
+  minimum_payment  NUMERIC(14,2),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );

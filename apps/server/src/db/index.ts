@@ -1,21 +1,52 @@
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { dataDir, dbPath } from "../config.js";
+import pg from "pg";
+import { config } from "../config.js";
+import { migrate } from "./migrate.js";
 
-// Storage is intentionally isolated behind this module. We use Node's
-// built-in node:sqlite (synchronous, zero native build). Swapping to
-// better-sqlite3 / @libsql/client later only touches this file.
+// Storage is intentionally isolated behind this module. Postgres runs in
+// Docker (see docker-compose.yml at the repo root).
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// Return NUMERIC / BIGINT (e.g. COUNT) as JS numbers and DATE as a plain
+// YYYY-MM-DD string, so API responses keep the same shape as before.
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => Number(v));
+pg.types.setTypeParser(pg.types.builtins.INT8, (v) => Number(v));
+pg.types.setTypeParser(pg.types.builtins.DATE, (v) => v);
 
-mkdirSync(dataDir, { recursive: true });
+export const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
 
-export const db = new DatabaseSync(dbPath);
+export function query<T extends pg.QueryResultRow = any>(text: string, params?: unknown[]): Promise<T[]> {
+  return pool.query<T>(text, params).then((r) => r.rows);
+}
 
-// Apply schema (idempotent) on boot.
-const schema = readFileSync(resolve(__dirname, "schema.sql"), "utf8");
-db.exec(schema);
+// Runs fn inside a single transaction on one pooled connection.
+export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
-export type Row = Record<string, unknown>;
+// Apply pending migrations on boot.
+export async function initDb(): Promise<void> {
+  try {
+    await pool.query("SELECT 1");
+  } catch (err) {
+    console.error(
+      `\n[fintrac] Could not connect to Postgres at ${redact(config.DATABASE_URL)}.\n` +
+        `Is the container running? Start it with: npm run db:up\n`,
+    );
+    throw err;
+  }
+  await migrate(pool);
+}
+
+function redact(url: string): string {
+  return url.replace(/\/\/([^:]+):[^@]+@/, "//$1:***@");
+}

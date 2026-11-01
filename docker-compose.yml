@@ -1,0 +1,24 @@
+# Local Postgres for fintrac. Start with `npm run db:up`.
+# Bound to 127.0.0.1 only — the database is never exposed off this machine.
+# Host port 5433 avoids clashing with any Postgres already on 5432.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: fintrac-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fintrac
+      POSTGRES_PASSWORD: fintrac
+      POSTGRES_DB: fintrac
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - fintrac-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintrac -d fintrac"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  fintrac-pgdata:

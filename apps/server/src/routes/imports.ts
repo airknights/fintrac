@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { upsertTransaction } from "../db/queries.js";
+import { withTransaction } from "../db/index.js";
+import { upsertTransaction, type TransactionInput } from "../db/queries.js";
 
 export const importRoutes = new Hono();
 
@@ -116,7 +117,7 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   if (rows.length < 2) return c.json({ error: "CSV file has no data rows" }, 400);
   const dataRows = rows.slice(1); // skip header
 
-  let imported = 0;
+  const toImport: TransactionInput[] = [];
   const skipped: number[] = [];
 
   dataRows.forEach((row, i) => {
@@ -137,9 +138,13 @@ importRoutes.post("/accounts/:id/import", async (c) => {
       if (mapping.flipSign) amount = -amount;
     }
 
-    upsertTransaction({ accountId, name, amount, date, isoCurrency: null, category: null });
-    imported++;
+    toImport.push({ accountId, name, amount, date, isoCurrency: null, category: null });
   });
 
-  return c.json({ imported, skipped: skipped.length, accountId });
+  // One transaction so a failed import leaves no partial rows behind.
+  await withTransaction(async (client) => {
+    for (const t of toImport) await upsertTransaction(t, client);
+  });
+
+  return c.json({ imported: toImport.length, skipped: skipped.length, accountId });
 });

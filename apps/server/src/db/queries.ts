@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
-import { db } from "./index.js";
+import type pg from "pg";
+import { pool, query } from "./index.js";
 
 // ── Accounts ───────────────────────────────────────────────────
 export interface CreateAccountInput {
@@ -11,36 +12,37 @@ export interface CreateAccountInput {
   openingBalance?: number | null;
 }
 
-export function createAccount(input: CreateAccountInput): string {
+export async function createAccount(input: CreateAccountInput): Promise<string> {
   const accountId = randomUUID();
-  db.prepare(
+  await query(
     `INSERT INTO accounts (account_id, name, institution_name, type, subtype, current_balance, iso_currency, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-  ).run(
-    accountId,
-    input.name,
-    input.institutionName ?? null,
-    input.type,
-    input.subtype ?? null,
-    input.openingBalance ?? 0,
-    input.isoCurrency ?? "USD",
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+    [
+      accountId,
+      input.name,
+      input.institutionName ?? null,
+      input.type,
+      input.subtype ?? null,
+      input.openingBalance ?? 0,
+      input.isoCurrency ?? "CAD",
+    ],
   );
   return accountId;
 }
 
-export function updateAccountBalance(accountId: string, balance: number): void {
-  db.prepare(`UPDATE accounts SET current_balance = ?, updated_at = datetime('now') WHERE account_id = ?`).run(
+export async function updateAccountBalance(accountId: string, balance: number): Promise<void> {
+  await query(`UPDATE accounts SET current_balance = $1, updated_at = now() WHERE account_id = $2`, [
     balance,
     accountId,
-  );
+  ]);
 }
 
-export function deleteAccount(accountId: string): void {
-  db.prepare(`DELETE FROM accounts WHERE account_id = ?`).run(accountId);
+export async function deleteAccount(accountId: string): Promise<void> {
+  await query(`DELETE FROM accounts WHERE account_id = $1`, [accountId]);
 }
 
-export function getAccounts(): any[] {
-  return db.prepare(`SELECT * FROM accounts ORDER BY type, name`).all();
+export function getAccounts(): Promise<any[]> {
+  return query(`SELECT * FROM accounts ORDER BY type, name`);
 }
 
 // ── Transactions ───────────────────────────────────────────────
@@ -60,12 +62,13 @@ export function hashTransactionId(accountId: string, date: string, amount: numbe
   return createHash("sha256").update(`${accountId}|${date}|${amount}|${name ?? ""}`).digest("hex").slice(0, 32);
 }
 
-export function upsertTransaction(t: TransactionInput): void {
+// Pass a transaction client to batch many upserts atomically.
+export async function upsertTransaction(t: TransactionInput, db: pg.Pool | pg.PoolClient = pool): Promise<void> {
   const transactionId = hashTransactionId(t.accountId, t.date, t.amount, t.name ?? null);
-  db.prepare(
+  await db.query(
     `INSERT INTO transactions (transaction_id, account_id, name, merchant_name, amount, iso_currency, date, category)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(transaction_id) DO UPDATE SET
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (transaction_id) DO UPDATE SET
        account_id = excluded.account_id,
        name = excluded.name,
        merchant_name = excluded.merchant_name,
@@ -73,30 +76,32 @@ export function upsertTransaction(t: TransactionInput): void {
        iso_currency = excluded.iso_currency,
        date = excluded.date,
        category = excluded.category`,
-  ).run(
-    transactionId,
-    t.accountId,
-    t.name ?? null,
-    t.merchantName ?? null,
-    t.amount,
-    t.isoCurrency ?? "USD",
-    t.date,
-    t.category ?? null,
+    [
+      transactionId,
+      t.accountId,
+      t.name ?? null,
+      t.merchantName ?? null,
+      t.amount,
+      t.isoCurrency ?? "CAD",
+      t.date,
+      t.category ?? null,
+    ],
   );
 }
 
-export function deleteTransaction(transactionId: string): void {
-  db.prepare(`DELETE FROM transactions WHERE transaction_id = ?`).run(transactionId);
+export async function deleteTransaction(transactionId: string): Promise<void> {
+  await query(`DELETE FROM transactions WHERE transaction_id = $1`, [transactionId]);
 }
 
 // ── Debt overrides ───────────────────────────────────────────────
-export function setDebtOverride(accountId: string, apr: number | null, minimum: number | null): void {
-  db.prepare(
+export async function setDebtOverride(accountId: string, apr: number | null, minimum: number | null): Promise<void> {
+  await query(
     `INSERT INTO debt_overrides (account_id, apr_percentage, minimum_payment, updated_at)
-     VALUES (?, ?, ?, datetime('now'))
-     ON CONFLICT(account_id) DO UPDATE SET
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (account_id) DO UPDATE SET
        apr_percentage = excluded.apr_percentage,
        minimum_payment = excluded.minimum_payment,
-       updated_at = datetime('now')`,
-  ).run(accountId, apr, minimum);
+       updated_at = now()`,
+    [accountId, apr, minimum],
+  );
 }

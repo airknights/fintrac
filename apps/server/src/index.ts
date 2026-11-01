@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
-import "./db/index.js"; // open DB + apply schema on boot
+import { initDb } from "./db/index.js";
 import { accountRoutes } from "./routes/accounts.js";
 import { transactionRoutes } from "./routes/transactions.js";
 import { debtRoutes } from "./routes/debts.js";
@@ -27,6 +27,8 @@ app.onError((err, c) => {
   console.error("[server error]", err);
   return c.json({ error: err.message ?? "Internal error" }, 500);
 });
+
+await initDb(); // connect + apply pending migrations before accepting requests
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   console.log(`[fintrac] server on http://localhost:${info.port}`);
