@@ -13,10 +13,12 @@ export function months(n: number): string {
   return parts.join(" ") || `${n} mo`;
 }
 
+const ACRONYMS = new Set(["tfsa", "rrsp", "fhsa", "resp", "gic", "heloc"]);
+
 export function titleCase(s: string): string {
   return s
     .toLowerCase()
     .split(/[_\s]+/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .map((w) => (ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
     .join(" ");
 }

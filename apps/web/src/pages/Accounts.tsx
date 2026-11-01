@@ -7,12 +7,13 @@ import {
   useImportPreview,
   useImportTransactions,
   useUpdateBalance,
+  useUpdateInstitution,
 } from "../hooks/api.js";
 import { money, titleCase } from "../format.js";
-import { DEBT_TYPES, INSTITUTIONS, groupByInstitution } from "../accounts.js";
+import { DEBT_TYPES, groupByInstitution, inferAccountKind, inferInstitution } from "../accounts.js";
+import { InstitutionPicker } from "../components/InstitutionPicker.js";
 
 const TYPES = ["depository", "credit", "loan", "investment", "other"];
-const OTHER_INSTITUTION = "__other__";
 
 export function Accounts() {
   const { data } = useAccounts();
@@ -66,12 +67,26 @@ export function Accounts() {
 function AddAccountForm() {
   const create = useCreateAccount();
   const [name, setName] = useState("");
-  const [institutionChoice, setInstitutionChoice] = useState(""); // a listed bank, OTHER_INSTITUTION, or "" for none
-  const [otherInstitution, setOtherInstitution] = useState("");
-  const institutionName = institutionChoice === OTHER_INSTITUTION ? otherInstitution : institutionChoice;
+  const [institutionName, setInstitutionName] = useState("");
+  // Once the user picks a bank themselves, stop guessing it from the name.
+  const [bankPickedByUser, setBankPickedByUser] = useState(false);
+  const bankGuessed = !bankPickedByUser && institutionName !== "";
   const [type, setType] = useState("depository");
   const [subtype, setSubtype] = useState("");
+  // Same for type/subtype: guessed together until the user edits either one.
+  const [kindPickedByUser, setKindPickedByUser] = useState(false);
+  const kindGuessed = !kindPickedByUser && subtype !== "";
   const [openingBalance, setOpeningBalance] = useState("0");
+
+  function handleNameChange(value: string) {
+    setName(value);
+    if (!bankPickedByUser) setInstitutionName(inferInstitution(value) ?? "");
+    if (!kindPickedByUser) {
+      const kind = inferAccountKind(value);
+      setType(kind?.type ?? "depository");
+      setSubtype(kind?.subtype ?? "");
+    }
+  }
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -88,7 +103,9 @@ function AddAccountForm() {
         onSuccess: () => {
           // Keep the institution selected: several accounts in a row are often at the same bank.
           setName("");
+          setType("depository");
           setSubtype("");
+          setKindPickedByUser(false);
           setOpeningBalance("0");
         },
       },
@@ -104,38 +121,28 @@ function AddAccountForm() {
           <input
             type="text"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => handleNameChange(e.target.value)}
             placeholder="TD Chequing"
             required
           />
         </label>
-        <label>
-          Institution{" "}
-          <select value={institutionChoice} onChange={(e) => setInstitutionChoice(e.target.value)}>
-            <option value="">choose…</option>
-            {INSTITUTIONS.map((i) => (
-              <option key={i} value={i}>
-                {i}
-              </option>
-            ))}
-            <option value={OTHER_INSTITUTION}>Other…</option>
-          </select>
-        </label>
-        {institutionChoice === OTHER_INSTITUTION && (
-          <label>
-            Institution name{" "}
-            <input
-              type="text"
-              value={otherInstitution}
-              onChange={(e) => setOtherInstitution(e.target.value)}
-              placeholder="e.g. RBC"
-              autoFocus
-            />
-          </label>
-        )}
+        <InstitutionPicker
+          value={institutionName}
+          onChange={(v) => {
+            setInstitutionName(v);
+            setBankPickedByUser(v !== "");
+          }}
+        />
+        {bankGuessed && <span className="muted" style={{ alignSelf: "center" }}>guessed from name</span>}
         <label>
           Type{" "}
-          <select value={type} onChange={(e) => setType(e.target.value)}>
+          <select
+            value={type}
+            onChange={(e) => {
+              setType(e.target.value);
+              setKindPickedByUser(true);
+            }}
+          >
             {TYPES.map((t) => (
               <option key={t} value={t}>
                 {titleCase(t)}
@@ -145,8 +152,17 @@ function AddAccountForm() {
         </label>
         <label>
           Subtype{" "}
-          <input type="text" value={subtype} onChange={(e) => setSubtype(e.target.value)} placeholder="chequing" />
+          <input
+            type="text"
+            value={subtype}
+            onChange={(e) => {
+              setSubtype(e.target.value);
+              setKindPickedByUser(true);
+            }}
+            placeholder="chequing"
+          />
         </label>
+        {kindGuessed && <span className="muted" style={{ alignSelf: "center" }}>guessed from name</span>}
         <label>
           Opening balance{" "}
           <input
@@ -172,6 +188,7 @@ function AccountRow({ account }: { account: Account }) {
   const deleteAccount = useDeleteAccount();
   const [balance, setBalance] = useState(String(account.current_balance ?? 0));
   const [importing, setImporting] = useState(false);
+  const [editingBank, setEditingBank] = useState(false);
 
   // Pick up balance changes made elsewhere (e.g. set from an imported CSV).
   useEffect(() => setBalance(String(account.current_balance ?? 0)), [account.current_balance]);
@@ -199,6 +216,9 @@ function AccountRow({ account }: { account: Account }) {
           <button className="btn small" onClick={() => setImporting((v) => !v)}>
             {importing ? "Close" : "Import CSV"}
           </button>
+          <button className="btn small" onClick={() => setEditingBank((v) => !v)}>
+            Change bank
+          </button>
           <button
             className="btn small"
             onClick={() => {
@@ -211,6 +231,13 @@ function AccountRow({ account }: { account: Account }) {
           </button>
         </td>
       </tr>
+      {editingBank && (
+        <tr>
+          <td colSpan={4}>
+            <EditBankForm account={account} onDone={() => setEditingBank(false)} />
+          </td>
+        </tr>
+      )}
       {importing && (
         <tr>
           <td colSpan={4}>
@@ -219,6 +246,32 @@ function AccountRow({ account }: { account: Account }) {
         </tr>
       )}
     </>
+  );
+}
+
+function EditBankForm({ account, onDone }: { account: Account; onDone: () => void }) {
+  const update = useUpdateInstitution();
+  const [institutionName, setInstitutionName] = useState(account.institution_name ?? "");
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    update.mutate(
+      { accountId: account.account_id, institutionName: institutionName.trim() || null },
+      { onSuccess: onDone },
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <InstitutionPicker label={`Bank for ${account.name}`} value={institutionName} onChange={setInstitutionName} />
+      <button className="btn primary small" type="submit" disabled={update.isPending}>
+        {update.isPending ? "Saving…" : "Save"}
+      </button>
+      <button className="btn small" type="button" onClick={onDone}>
+        Cancel
+      </button>
+      {update.error && <span className="error">{(update.error as Error).message}</span>}
+    </form>
   );
 }
 
@@ -394,7 +447,7 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
               ) : (
                 <>
                   {moneyInSelect("Money deposited")}
-                  {moneyOutSelect("Money withdrawn")}
+                  {moneyOutSelect("Money withdrawn/transferred")}
                 </>
               )}
             </div>

@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { createAccount, deleteAccount, getAccounts, updateAccountBalance } from "../db/queries.js";
+import {
+  createAccount,
+  deleteAccount,
+  getAccounts,
+  updateAccountBalance,
+  updateAccountInstitution,
+} from "../db/queries.js";
 
 export const accountRoutes = new Hono();
 
@@ -33,6 +39,16 @@ accountRoutes.patch("/accounts/:id/balance", async (c) => {
   const parsed = balanceSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
   await updateAccountBalance(c.req.param("id"), parsed.data.balance);
+  return c.json({ ok: true });
+});
+
+const institutionSchema = z.object({ institutionName: z.string().trim().nullable() });
+
+accountRoutes.patch("/accounts/:id/institution", async (c) => {
+  const parsed = institutionSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
+  const found = await updateAccountInstitution(c.req.param("id"), parsed.data.institutionName || null);
+  if (!found) return c.json({ error: "Account not found" }, 404);
   return c.json({ ok: true });
 });
 

@@ -72,6 +72,15 @@ export function useUpdateBalance() {
   });
 }
 
+export function useUpdateInstitution() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { accountId: string; institutionName: string | null }) =>
+      api.patch(`/accounts/${payload.accountId}/institution`, { institutionName: payload.institutionName }),
+    onSuccess: () => invalidateAll(qc),
+  });
+}
+
 export function useDeleteAccount() {
   const qc = useQueryClient();
   return useMutation({

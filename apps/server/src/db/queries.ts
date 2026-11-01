@@ -37,6 +37,15 @@ export async function updateAccountBalance(accountId: string, balance: number): 
   ]);
 }
 
+// Returns false if no such account.
+export async function updateAccountInstitution(accountId: string, institutionName: string | null): Promise<boolean> {
+  const rows = await query(
+    `UPDATE accounts SET institution_name = $1, updated_at = now() WHERE account_id = $2 RETURNING account_id`,
+    [institutionName, accountId],
+  );
+  return rows.length > 0;
+}
+
 export async function deleteAccount(accountId: string): Promise<void> {
   await query(`DELETE FROM accounts WHERE account_id = $1`, [accountId]);
 }
