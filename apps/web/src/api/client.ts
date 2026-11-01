@@ -92,7 +92,10 @@ export interface ImportMapping {
   balanceCol?: number;
   dateFormat: "YMD" | "MDY" | "DMY";
   flipSign?: boolean;
-  hasHeader: boolean;
+  // Row indexes into the file (0-based, blank lines ignored). headerRow null = no header row.
+  headerRow?: number | null;
+  dataStartRow?: number;
+  hasHeader?: boolean; // legacy: mappings saved before headerRow existed
 }
 
 export interface ImportResult {

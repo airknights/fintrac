@@ -5,9 +5,19 @@ import { upsertTransaction, type TransactionInput } from "../db/queries.js";
 
 export const importRoutes = new Hono();
 
-// Minimal RFC4180-subset CSV parser: handles quoted fields, embedded commas,
-// and "" as an escaped quote. Good enough for bank export files.
+// Picks the delimiter that appears most in the first lines (outside quotes is
+// close enough here). Some bank "CSV" exports are really tab-separated.
+function detectDelimiter(text: string): string {
+  const head = text.split(/\r?\n/, 10).join("\n");
+  const counts = [",", "\t", ";"].map((d) => [d, head.split(d).length - 1] as const);
+  return counts.reduce((best, cur) => (cur[1] > best[1] ? cur : best))[0];
+}
+
+// Minimal RFC4180-subset CSV parser: handles quoted fields, embedded
+// delimiters, and "" as an escaped quote. Good enough for bank export files.
 function parseCsv(text: string): string[][] {
+  text = text.replace(/^﻿/, ""); // strip a UTF-8 BOM so it doesn't stick to the first cell
+  const delimiter = detectDelimiter(text);
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -28,7 +38,7 @@ function parseCsv(text: string): string[][] {
       }
     } else if (ch === '"') {
       inQuotes = true;
-    } else if (ch === ",") {
+    } else if (ch === delimiter) {
       row.push(field);
       field = "";
     } else if (ch === "\n" || ch === "\r") {
@@ -49,9 +59,11 @@ function parseCsv(text: string): string[][] {
 }
 
 const previewSchema = z.object({ csv: z.string().min(1) });
+const PREVIEW_ROWS = 20;
 
-// Returns the first rows raw; the client decides whether row 0 is a header
-// (some banks, e.g. TD, export with no header row).
+// Returns the first rows raw so the user can pick which row holds the column
+// names and where transactions start (some files have account info above the
+// header, e.g. CTFS; some have no header at all, e.g. TD).
 importRoutes.post("/accounts/:id/import-preview", async (c) => {
   const parsed = previewSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
@@ -59,7 +71,7 @@ importRoutes.post("/accounts/:id/import-preview", async (c) => {
   const rows = parseCsv(parsed.data.csv);
   if (rows.length === 0) return c.json({ error: "CSV file is empty" }, 400);
 
-  const sample = rows.slice(0, 6);
+  const sample = rows.slice(0, PREVIEW_ROWS);
   return c.json({ rows: sample, columnCount: Math.max(...sample.map((r) => r.length)) });
 });
 
@@ -74,8 +86,18 @@ const mappingSchema = z.object({
   balanceCol: z.number().int().min(0).optional(),
   dateFormat: dateFormats,
   flipSign: z.boolean().optional(),
-  hasHeader: z.boolean().default(true),
+  // Row indexes (0-based, blank lines ignored). headerRow null = no header row.
+  headerRow: z.number().int().min(0).nullable().optional(),
+  dataStartRow: z.number().int().min(0).optional(),
+  hasHeader: z.boolean().optional(), // legacy: mappings saved before headerRow existed
 });
+
+// First row of transactions, honouring mappings saved before headerRow existed.
+function dataStartRow(mapping: z.infer<typeof mappingSchema>): number {
+  if (mapping.dataStartRow !== undefined) return mapping.dataStartRow;
+  const headerRow = mapping.headerRow !== undefined ? mapping.headerRow : mapping.hasHeader === false ? null : 0;
+  return headerRow === null ? 0 : headerRow + 1;
+}
 
 const importSchema = z.object({
   csvs: z.array(z.string().min(1)).min(1),
@@ -138,7 +160,7 @@ importRoutes.post("/accounts/:id/import", async (c) => {
 
   for (const csv of csvs) {
     const rows = parseCsv(csv);
-    const dataRows = mapping.hasHeader ? rows.slice(1) : rows;
+    const dataRows = rows.slice(dataStartRow(mapping));
 
     const parsedRows: Array<{ date: string; balance: number | null }> = [];
     for (const row of dataRows) {

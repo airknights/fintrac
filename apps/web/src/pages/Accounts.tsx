@@ -283,7 +283,9 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
   const [amountMode, setAmountMode] = useState<"single" | "split">(
     saved && (saved.debitCol !== undefined || saved.creditCol !== undefined) ? "split" : "single",
   );
-  const [mapping, setMapping] = useState<Partial<ImportMapping>>(saved ?? { dateFormat: "YMD", hasHeader: true });
+  const [mapping, setMapping] = useState<Partial<ImportMapping>>(
+    saved ?? { dateFormat: "YMD", headerRow: 0, dataStartRow: 1 },
+  );
   const [result, setResult] = useState<ImportResult | null>(null);
   const preview = useImportPreview();
   const doImport = useImportTransactions();
@@ -296,7 +298,16 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
     setFileNames(files.map((f) => f.name));
     setCsvs(texts);
     // Files from the same bank share a layout, so previewing the first is enough.
-    preview.mutate({ accountId, csv: texts[0]! });
+    preview.mutate(
+      { accountId, csv: texts[0]! },
+      {
+        onSuccess: (data) => {
+          if (saved) return; // keep the rows the user chose last time
+          const header = guessHeaderRow(data.rows, data.columnCount);
+          setMapping((m) => ({ ...m, headerRow: header, dataStartRow: header + 1 }));
+        },
+      },
+    );
   }
 
   const mappingComplete =
@@ -311,13 +322,20 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
     doImport.mutate({ accountId, csvs, mapping: mapping as ImportMapping }, { onSuccess: (r) => setResult(r) });
   }
 
-  const hasHeader = mapping.hasHeader ?? true;
+  // Mappings saved before headerRow existed only have hasHeader.
+  const headerRow =
+    mapping.headerRow !== undefined ? mapping.headerRow : mapping.hasHeader === false ? null : 0;
+  const dataStartRow = mapping.dataStartRow ?? (headerRow === null ? 0 : headerRow + 1);
   const rawRows = preview.data?.rows ?? [];
   const columnCount = preview.data?.columnCount ?? 0;
-  const headers = hasHeader
-    ? Array.from({ length: columnCount }, (_, i) => rawRows[0]?.[i] || `Column ${i + 1}`)
-    : Array.from({ length: columnCount }, (_, i) => `Column ${i + 1}`);
-  const sampleRows = hasHeader ? rawRows.slice(1) : rawRows.slice(0, 5);
+  const headers = Array.from(
+    { length: columnCount },
+    (_, i) => (headerRow !== null && rawRows[headerRow]?.[i]?.trim()) || `Column ${i + 1}`,
+  );
+  const rowLabel = (i: number) => {
+    const text = (rawRows[i] ?? []).filter((c) => c.trim()).slice(0, 3).join(" · ");
+    return `Row ${i + 1}${text ? `: ${text.length > 40 ? text.slice(0, 40) + "…" : text}` : ""}`;
+  };
 
   // Plain-language column names instead of bank jargon (debit/credit).
   const isDebt = DEBT_TYPES.has(account.type);
@@ -340,7 +358,10 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
 
   return (
     <div className="card">
-      <h3>Import transactions</h3>
+      <h3>
+        Import transactions into {account.name}{" "}
+        <span className="muted">({isDebt ? "credit card / loan" : "bank account"})</span>
+      </h3>
       <input type="file" accept=".csv,text/csv" multiple onChange={handleFiles} />
       {fileNames.length > 0 && (
         <p className="muted">
@@ -353,28 +374,63 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
 
       {columnCount > 0 && (
         <>
-          <label>
-            <input
-              type="checkbox"
-              checked={hasHeader}
-              onChange={(e) => setMapping((m) => ({ ...m, hasHeader: e.target.checked }))}
-            />{" "}
-            First row is column headers
-          </label>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <label>
+              Column names are in:{" "}
+              <select
+                value={headerRow ?? ""}
+                onChange={(e) => {
+                  const h = e.target.value === "" ? null : Number(e.target.value);
+                  setMapping((m) => ({ ...m, headerRow: h, dataStartRow: h === null ? 0 : h + 1 }));
+                }}
+              >
+                <option value="">No header row</option>
+                {rawRows.map((_, i) => (
+                  <option key={i} value={i}>
+                    {rowLabel(i)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Transactions start at:{" "}
+              <select
+                value={dataStartRow}
+                onChange={(e) => setMapping((m) => ({ ...m, dataStartRow: Number(e.target.value) }))}
+              >
+                {rawRows.map((_, i) => (
+                  <option key={i} value={i}>
+                    {rowLabel(i)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="muted" style={{ margin: "6px 0" }}>
+            Rows above the transactions (other than the column names) are skipped.
+          </p>
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead>
                 <tr>
+                  <th>Row</th>
                   {headers.map((h, i) => (
                     <th key={i}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {sampleRows.map((row, i) => (
-                  <tr key={i}>
-                    {row.map((cell, j) => (
-                      <td key={j}>{cell}</td>
+                {rawRows.map((row, i) => (
+                  <tr
+                    key={i}
+                    className={i === headerRow ? "header-row" : i < dataStartRow ? "skipped-row" : undefined}
+                  >
+                    <td className="muted">
+                      {i + 1}
+                      {i === headerRow ? " · names" : i < dataStartRow ? " · skipped" : ""}
+                    </td>
+                    {Array.from({ length: columnCount }, (_, j) => (
+                      <td key={j}>{row[j] ?? ""}</td>
                     ))}
                   </tr>
                 ))}
@@ -486,6 +542,19 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       {doImport.error && <p className="error">{(doImport.error as Error).message}</p>}
     </div>
   );
+}
+
+// Header row guess: the first row filled across (nearly) every column whose
+// cells are all text, i.e. no dates or amounts. Account-info lines above the
+// header usually have only a cell or two.
+function guessHeaderRow(rows: string[][], columnCount: number): number {
+  const looksLikeData = (cell: string) => /\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}/.test(cell) || /^-?\$?[\d,]+\.\d{2}$/.test(cell.trim());
+  const minFilled = Math.max(2, Math.ceil(columnCount * 0.6));
+  const index = rows.findIndex((r) => {
+    const filled = r.filter((c) => c.trim());
+    return filled.length >= minFilled && !filled.some(looksLikeData);
+  });
+  return index === -1 ? 0 : index;
 }
 
 function ColSelect({
