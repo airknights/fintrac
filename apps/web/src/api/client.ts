@@ -1,0 +1,99 @@
+// Thin fetch wrapper around the local backend (same-origin via Vite proxy).
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as any).error ?? `Request failed: ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const api = {
+  get: <T>(path: string) => request<T>(path),
+  post: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
+  del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+};
+
+// ── Response types ─────────────────────────────────────────────
+export interface Account {
+  account_id: string;
+  name: string;
+  institution_name: string | null;
+  type: string;
+  subtype: string | null;
+  current_balance: number | null;
+  iso_currency: string;
+}
+
+export interface NetWorth {
+  assets: number;
+  debts: number;
+  netWorth: number;
+  accountCount: number;
+}
+
+export interface SpendingResponse {
+  days: number;
+  total: number;
+  byCategory: Array<{ category: string; total: number; count: number }>;
+}
+
+export interface DebtsResponse {
+  totalDebt: number;
+  debts: Array<{
+    accountId: string;
+    name: string;
+    balance: number;
+    apr: number | null;
+    minimumPayment: number | null;
+    needsInput: boolean;
+  }>;
+}
+
+export interface PayoffResult {
+  strategy: "avalanche" | "snowball";
+  feasible: boolean;
+  reason?: string;
+  months: number;
+  totalInterest: number;
+  totalPaid: number;
+  payoffOrder: Array<{ id: string; name: string; payoffMonth: number }>;
+  schedule: Array<{ month: number; totalBalance: number }>;
+}
+
+export interface DebtPlanResponse {
+  avalanche: PayoffResult;
+  snowball: PayoffResult;
+  interestSaved: number;
+  monthsSaved: number;
+  debtsUsed: number;
+  needsInput: Array<{ accountId: string; name: string; balance: number }>;
+}
+
+export interface ImportPreview {
+  headers: string[];
+  rows: string[][];
+}
+
+export interface ImportMapping {
+  dateCol: number;
+  nameCol: number;
+  amountCol?: number;
+  debitCol?: number;
+  creditCol?: number;
+  dateFormat: "YMD" | "MDY" | "DMY";
+  flipSign?: boolean;
+}
+
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  accountId: string;
+}

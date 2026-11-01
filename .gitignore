@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# env & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# local database — NEVER commit financial data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+apps/server/data/
+
+# build output
+dist/
+build/
+
+# editor
+.idea/
+.vscode/
+*.log

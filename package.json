@@ -1,0 +1,22 @@
+{
+  "name": "fintrac",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first personal financial tracker (manual accounts + CSV import). Net worth, spending, and a debt-payoff plan.",
+  "workspaces": [
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev --workspace apps/server",
+    "dev:web": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace apps/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
