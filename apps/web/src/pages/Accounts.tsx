@@ -79,7 +79,7 @@ function AddAccountForm() {
   const [kindPickedByUser, setKindPickedByUser] = useState(false);
   const kindGuessed = !kindPickedByUser && subtype !== "";
   const [openingBalance, setOpeningBalance] = useState("0");
-  const [availableCredit, setAvailableCredit] = useState("");
+  const [creditLimit, setCreditLimit] = useState("");
 
   function handleNameChange(value: string) {
     setName(value);
@@ -101,7 +101,7 @@ function AddAccountForm() {
         type,
         subtype: subtype.trim() || null,
         openingBalance: Number(openingBalance) || 0,
-        availableCredit: type === "credit" && availableCredit.trim() !== "" ? Number(availableCredit) : null,
+        creditLimit: type === "credit" && creditLimit.trim() !== "" ? Number(creditLimit) : null,
       },
       {
         onSuccess: () => {
@@ -111,7 +111,7 @@ function AddAccountForm() {
           setSubtype("");
           setKindPickedByUser(false);
           setOpeningBalance("0");
-          setAvailableCredit("");
+          setCreditLimit("");
         },
       },
     );
@@ -178,14 +178,15 @@ function AddAccountForm() {
           />
         </label>
         {type === "credit" && (
-          <label>
-            Available credit{" "}
+          <label title="Available credit is worked out as limit minus balance owed.">
+            Credit limit{" "}
             <input
               type="number"
-              value={availableCredit}
+              value={creditLimit}
               step="0.01"
+              min="0"
               placeholder="optional"
-              onChange={(e) => setAvailableCredit(e.target.value)}
+              onChange={(e) => setCreditLimit(e.target.value)}
             />
           </label>
         )}
@@ -204,16 +205,13 @@ function AccountRow({ account }: { account: Account }) {
   const updateBalance = useUpdateBalance();
   const deleteAccount = useDeleteAccount();
   const [balance, setBalance] = useState(String(account.current_balance ?? 0));
-  const [available, setAvailable] = useState(account.available_credit === null ? "" : String(account.available_credit));
+  const [limit, setLimit] = useState(account.credit_limit === null ? "" : String(account.credit_limit));
   const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState(false);
 
-  // Pick up changes made elsewhere (imports move the balance and available credit).
+  // Pick up changes made elsewhere (imports can move the balance and the limit).
   useEffect(() => setBalance(String(account.current_balance ?? 0)), [account.current_balance]);
-  useEffect(
-    () => setAvailable(account.available_credit === null ? "" : String(account.available_credit)),
-    [account.available_credit],
-  );
+  useEffect(() => setLimit(account.credit_limit === null ? "" : String(account.credit_limit)), [account.credit_limit]);
 
   return (
     <>
@@ -237,23 +235,31 @@ function AccountRow({ account }: { account: Account }) {
             {account.balance_as_of ? `as of ${account.balance_as_of} + later transactions` : "from transactions"}
           </div>
           {account.type === "credit" && (
-            <label className="small-note">
-              Available{" "}
-              <input
-                type="number"
-                value={available}
-                placeholder="—"
-                style={{ width: 100 }}
-                onChange={(e) => setAvailable(e.target.value)}
-                onBlur={() => {
-                  const n = available.trim() === "" ? null : Number(available);
-                  if (n !== null && Number.isNaN(n)) return;
-                  if (n !== account.available_credit) {
-                    updateBalance.mutate({ accountId: account.account_id, availableCredit: n });
-                  }
-                }}
-              />
-            </label>
+            <>
+              <label className="small-note">
+                Limit{" "}
+                <input
+                  type="number"
+                  value={limit}
+                  min="0"
+                  placeholder="—"
+                  style={{ width: 100 }}
+                  onChange={(e) => setLimit(e.target.value)}
+                  onBlur={() => {
+                    const n = limit.trim() === "" ? null : Number(limit);
+                    if (n !== null && Number.isNaN(n)) return;
+                    if (n !== account.credit_limit) {
+                      updateBalance.mutate({ accountId: account.account_id, creditLimit: n });
+                    }
+                  }}
+                />
+              </label>
+              <div className="muted small-note">
+                {account.available_credit === null
+                  ? "Available: set a limit"
+                  : `Available: ${money(account.available_credit)}`}
+              </div>
+            </>
           )}
         </td>
         <td className="right">
@@ -382,6 +388,7 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       header === null ? null : (rows[header] ?? null),
       rows.slice(dataStart),
       columnCount,
+      { creditCard: account.type === "credit" },
     );
     setAmountMode(mode);
     setMapping((m) => ({ dateFormat: m.dateFormat, ...cols, headerRow: header, dataStartRow: dataStart }));
@@ -664,6 +671,17 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
               allowNone
             />
           </div>
+          {account.type === "credit" && (
+            <div style={{ marginTop: 8 }}>
+              <ColSelect
+                label="Available credit column (optional — sets the credit limit; otherwise available = limit − balance)"
+                headers={headers}
+                value={mapping.availableCol}
+                onChange={(v) => setMapping((m) => ({ ...m, availableCol: v }))}
+                allowNone
+              />
+            </div>
+          )}
 
           <div style={{ marginTop: 14 }}>
             <button className="btn primary" onClick={handleImport} disabled={doImport.isPending || !mappingComplete}>
@@ -684,6 +702,7 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
           {result.balance !== null && ` Current balance: ${money(result.balance)}`}
           {result.balanceDate && ` (from the file's balance on ${result.balanceDate}, plus anything later)`}
           {result.balance !== null && "."}
+          {result.creditLimit !== null && ` Credit limit set to ${money(result.creditLimit)} from the file's available credit.`}
         </p>
       )}
       {result?.balanceCheck &&

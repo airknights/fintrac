@@ -32,12 +32,13 @@ export function guessHeaderRow(rows: string[][], columnCount: number): number | 
 }
 
 // Header-name patterns, most specific first. Transaction date beats posted date.
-const NAME_PATTERNS: Record<"date" | "name" | "amount" | "debit" | "credit" | "balance", RegExp[]> = {
+const NAME_PATTERNS: Record<"date" | "name" | "amount" | "debit" | "credit" | "available" | "balance", RegExp[]> = {
   date: [/trans(action)?\.?\s*date/i, /^date$/i, /\bdate\b/i],
   name: [/description|details|narrative/i, /merchant|payee/i, /memo|name/i],
   amount: [/^amount$/i, /\bamount\b/i],
   debit: [/debit|withdraw|money out|paid out|charges?|purchases?|spent/i],
   credit: [/credit|deposit|money in|paid in|payments?|received/i],
+  available: [/available/i],
   balance: [/balance/i],
 };
 
@@ -51,7 +52,14 @@ function findByName(headers: string[], key: keyof typeof NAME_PATTERNS, taken: S
 
 export type ColumnGuess = Partial<ImportMapping> & { amountMode: "single" | "split" };
 
-export function guessColumns(headerCells: string[] | null, dataRows: string[][], columnCount: number): ColumnGuess {
+// creditCard: look for an available-credit column. For bank accounts an
+// "Available Balance" column is just the balance.
+export function guessColumns(
+  headerCells: string[] | null,
+  dataRows: string[][],
+  columnCount: number,
+  { creditCard = false }: { creditCard?: boolean } = {},
+): ColumnGuess {
   const sample = dataRows.slice(0, 20);
   const col = (j: number) => sample.map((r) => r[j] ?? "");
   const share = (j: number, test: (c: string) => boolean) => {
@@ -68,6 +76,8 @@ export function guessColumns(headerCells: string[] | null, dataRows: string[][],
   // 1. By header name.
   if (headerCells) {
     g.dateCol = take(findByName(headerCells, "date", taken));
+    // Before balance, so a card's "Available Credit" / "Available Balance" isn't taken as the balance.
+    if (creditCard) g.availableCol = take(findByName(headerCells, "available", taken));
     g.balanceCol = take(findByName(headerCells, "balance", taken));
     g.amountCol = take(findByName(headerCells, "amount", taken));
     if (g.amountCol === undefined) {

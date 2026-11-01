@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { query, withTransaction } from "../db/index.js";
-import { ACCOUNTS_SQL, upsertTransaction, type TransactionInput } from "../db/queries.js";
+import { ACCOUNTS_SQL, DELTA_SQL, upsertTransaction, type TransactionInput } from "../db/queries.js";
 
 export const importRoutes = new Hono();
 
@@ -86,6 +86,7 @@ const mappingSchema = z.object({
   debitCol: z.number().int().min(0).optional(),
   creditCol: z.number().int().min(0).optional(),
   balanceCol: z.number().int().min(0).optional(),
+  availableCol: z.number().int().min(0).optional(), // credit cards: available credit
   dateFormat: dateFormats,
   flipSign: z.boolean().optional(),
   // Row indexes (0-based, blank lines ignored). headerRow null = no header row.
@@ -159,11 +160,12 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   const toImport: TransactionInput[] = [];
   let skipped = 0;
   // Each file's rows in chronological order (oldest first), with the bank's
-  // running balance when a balance column is mapped.
-  const files: Array<Array<{ date: string; amount: number; balance: number | null }>> = [];
+  // running balance / available credit when those columns are mapped.
+  type FileRow = { date: string; amount: number; balance: number | null; available: number | null };
+  const files: FileRow[][] = [];
 
   for (const csv of csvs) {
-    const parsedRows: Array<TransactionInput & { balance: number | null }> = [];
+    const parsedRows: Array<TransactionInput & { balance: number | null; available: number | null }> = [];
     for (const row of parseCsv(csv).slice(dataStartRow(mapping))) {
       const date = normalizeDate(row[mapping.dateCol] ?? "", mapping.dateFormat);
       const name = (row[mapping.nameCol] ?? "").trim() || null;
@@ -183,7 +185,8 @@ importRoutes.post("/accounts/:id/import", async (c) => {
       }
 
       const balance = mapping.balanceCol !== undefined ? parseOptionalAmount(row[mapping.balanceCol]) : null;
-      parsedRows.push({ accountId, name, amount, date, isoCurrency: null, category: null, balance });
+      const available = mapping.availableCol !== undefined ? parseOptionalAmount(row[mapping.availableCol]) : null;
+      parsedRows.push({ accountId, name, amount, date, isoCurrency: null, category: null, balance, available });
     }
 
     // Banks list rows newest-first or oldest-first; normalize to oldest-first
@@ -191,8 +194,8 @@ importRoutes.post("/accounts/:id/import", async (c) => {
     const first = parsedRows[0];
     const last = parsedRows[parsedRows.length - 1];
     const chronological = first && last && first.date > last.date ? parsedRows.reverse() : parsedRows;
-    for (const { balance: _, ...t } of chronological) toImport.push(t);
-    files.push(chronological.map((r) => ({ date: r.date, amount: r.amount, balance: r.balance })));
+    for (const { balance: _, available: __, ...t } of chronological) toImport.push(t);
+    files.push(chronological.map((r) => ({ date: r.date, amount: r.amount, balance: r.balance, available: r.available })));
   }
 
   if (toImport.length === 0) {
@@ -212,6 +215,17 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   for (const rows of files) {
     for (const r of rows) {
       if (r.balance !== null && (!latest || r.date >= latest.date)) latest = { date: r.date, balance: toOurBalance(r.balance) };
+    }
+  }
+
+  // Newest available credit in the files (credit cards only) sets the credit
+  // limit: available + balance owed at that row.
+  let latestAvailable: FileRow | null = null;
+  if (account.type === "credit") {
+    for (const rows of files) {
+      for (const r of rows) {
+        if (r.available !== null && (!latestAvailable || r.date >= latestAvailable.date)) latestAvailable = r;
+      }
     }
   }
 
@@ -235,6 +249,8 @@ importRoutes.post("/accounts/:id/import", async (c) => {
     }
   }
 
+  let creditLimit: number | null = null; // set if the file's available-credit column updated it
+
   // One transaction so a failed import leaves no partial rows behind.
   await withTransaction(async (client) => {
     for (const t of toImport) await upsertTransaction(t, client);
@@ -249,6 +265,26 @@ importRoutes.post("/accounts/:id/import", async (c) => {
        WHERE account_id = $4`,
       [JSON.stringify(mapping), latest?.balance ?? null, latest?.date ?? null, accountId],
     );
+
+    if (latestAvailable) {
+      // Balance owed at that row: from the file if it has one, otherwise the
+      // account's balance at the end of that day.
+      let owed: number;
+      if (latestAvailable.balance !== null) {
+        owed = toOurBalance(latestAvailable.balance);
+      } else {
+        const { rows } = await client.query<{ owed: number }>(
+          `SELECT a.current_balance - COALESCE(SUM(${DELTA_SQL}) FILTER (WHERE t.date > $2::date), 0) AS owed
+           FROM (${ACCOUNTS_SQL}) a LEFT JOIN transactions t ON t.account_id = a.account_id
+           WHERE a.account_id = $1
+           GROUP BY a.current_balance`,
+          [accountId, latestAvailable.date],
+        );
+        owed = rows[0]!.owed;
+      }
+      creditLimit = Math.round((latestAvailable.available! + owed) * 100) / 100;
+      await client.query(`UPDATE accounts SET credit_limit = $1 WHERE account_id = $2`, [creditLimit, accountId]);
+    }
   });
 
   const [updated] = await query<{ current_balance: number }>(`${ACCOUNTS_SQL} WHERE a.account_id = $1`, [accountId]);
@@ -260,6 +296,7 @@ importRoutes.post("/accounts/:id/import", async (c) => {
     balance: updated?.current_balance ?? null, // current balance after the import
     balanceDate: latest?.date ?? null, // set when the file's balance column re-anchored the account
     balanceCheck: checked > 0 ? { checked, mismatches, firstMismatchDate } : null,
+    creditLimit,
     accountId,
   });
 });

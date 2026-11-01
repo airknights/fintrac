@@ -32,7 +32,7 @@ export interface Account {
   anchor_balance: number;
   balance_as_of: string | null; // YYYY-MM-DD; null = no balance known yet
   credit_limit: number | null;
-  available_credit: number | null; // credit cards with a known limit
+  available_credit: number | null; // credit_limit - current_balance (credit cards with a known limit)
   iso_currency: string;
   import_mapping: ImportMapping | null; // saved from the last CSV import
 }
@@ -94,6 +94,7 @@ export interface ImportMapping {
   debitCol?: number;
   creditCol?: number;
   balanceCol?: number;
+  availableCol?: number; // credit cards: available credit
   dateFormat: "YMD" | "MDY" | "DMY";
   flipSign?: boolean;
   // Row indexes into the file (0-based, blank lines ignored). headerRow null = no header row.
@@ -110,6 +111,7 @@ export interface ImportResult {
   balanceDate: string | null; // set when the file's balance column updated the balance
   // Did each row's amount explain the change in the bank's running balance?
   balanceCheck: { checked: number; mismatches: number; firstMismatchDate: string | null } | null;
+  creditLimit: number | null; // set when the file's available-credit column updated the limit
   accountId: string;
 }
 

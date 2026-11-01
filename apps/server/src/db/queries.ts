@@ -30,7 +30,9 @@ export interface CreateAccountInput {
   subtype?: string | null;
   isoCurrency?: string | null;
   openingBalance?: number | null;
-  availableCredit?: number | null; // credit cards only
+  // Credit cards / lines of credit: the limit, or available credit to derive it from.
+  creditLimit?: number | null;
+  availableCredit?: number | null;
 }
 
 export async function createAccount(input: CreateAccountInput): Promise<string> {
@@ -39,7 +41,10 @@ export async function createAccount(input: CreateAccountInput): Promise<string> 
   // imported balance column or typed balance will anchor it.
   const balance = input.openingBalance ?? 0;
   const balanceKnown = balance !== 0;
-  const creditLimit = input.type === "credit" && input.availableCredit != null ? input.availableCredit + balance : null;
+  const creditLimit =
+    input.type !== "credit"
+      ? null
+      : (input.creditLimit ?? (input.availableCredit != null ? input.availableCredit + balance : null));
   await query(
     `INSERT INTO accounts (account_id, name, institution_name, type, subtype, anchor_balance, balance_as_of,
                            credit_limit, iso_currency, updated_at)
@@ -59,12 +64,12 @@ export async function createAccount(input: CreateAccountInput): Promise<string> 
   return accountId;
 }
 
-// The user typed the balance (and, for cards, available credit) as their bank
-// shows it today. Transactions up to today are taken as already included.
-// Returns false if no such account.
+// The user typed the balance (and, for cards, the credit limit or available
+// credit) as their bank shows it today. Transactions up to today are taken as
+// already included. Returns false if no such account.
 export async function updateAccountBalance(
   accountId: string,
-  update: { balance?: number; availableCredit?: number | null },
+  update: { balance?: number; creditLimit?: number | null; availableCredit?: number | null },
 ): Promise<boolean> {
   return withTransaction(async (client) => {
     if (update.balance !== undefined) {
@@ -76,9 +81,14 @@ export async function updateAccountBalance(
     const { rows } = await client.query(`${ACCOUNTS_SQL} WHERE a.account_id = $1`, [accountId]);
     const account = rows[0];
     if (!account) return false;
-    if (update.availableCredit !== undefined) {
-      // Banks show balance + available credit; the limit is their sum.
-      const limit = update.availableCredit === null ? null : update.availableCredit + account.current_balance;
+    if (update.creditLimit !== undefined || update.availableCredit !== undefined) {
+      // A limit is stored as is; available credit + balance owed = limit.
+      const limit =
+        update.creditLimit !== undefined
+          ? update.creditLimit
+          : update.availableCredit === null || update.availableCredit === undefined
+            ? null
+            : update.availableCredit + account.current_balance;
       await client.query(`UPDATE accounts SET credit_limit = $1, updated_at = now() WHERE account_id = $2`, [
         limit,
         accountId,

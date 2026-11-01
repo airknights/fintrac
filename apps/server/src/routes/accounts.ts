@@ -26,6 +26,7 @@ const createSchema = z.object({
   subtype: z.string().min(1).nullable().optional(),
   isoCurrency: z.string().min(1).optional(),
   openingBalance: z.number().optional(),
+  creditLimit: z.number().min(0).nullable().optional(),
   availableCredit: z.number().nullable().optional(),
 });
 
@@ -38,8 +39,15 @@ accountRoutes.post("/accounts", async (c) => {
 
 // Either or both, as the bank shows them today.
 const balanceSchema = z
-  .object({ balance: z.number().optional(), availableCredit: z.number().nullable().optional() })
-  .refine((b) => b.balance !== undefined || b.availableCredit !== undefined, "balance or availableCredit required");
+  .object({
+    balance: z.number().optional(),
+    creditLimit: z.number().min(0).nullable().optional(),
+    availableCredit: z.number().nullable().optional(),
+  })
+  .refine(
+    (b) => b.balance !== undefined || b.creditLimit !== undefined || b.availableCredit !== undefined,
+    "balance, creditLimit or availableCredit required",
+  );
 
 accountRoutes.patch("/accounts/:id/balance", async (c) => {
   const parsed = balanceSchema.safeParse(await c.req.json().catch(() => ({})));

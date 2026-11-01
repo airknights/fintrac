@@ -75,7 +75,7 @@ export interface CreateAccountPayload {
   subtype?: string | null;
   isoCurrency?: string;
   openingBalance?: number;
-  availableCredit?: number | null;
+  creditLimit?: number | null;
 }
 
 export function useCreateAccount() {
@@ -90,7 +90,7 @@ export function useUpdateBalance() {
   const qc = useQueryClient();
   return useMutation({
     // Either or both, as the bank shows them today.
-    mutationFn: ({ accountId, ...update }: { accountId: string; balance?: number; availableCredit?: number | null }) =>
+    mutationFn: ({ accountId, ...update }: { accountId: string; balance?: number; creditLimit?: number | null }) =>
       api.patch(`/accounts/${accountId}/balance`, update),
     onSuccess: () => invalidateAll(qc),
   });
