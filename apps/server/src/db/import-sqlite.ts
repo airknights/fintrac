@@ -31,11 +31,11 @@ const overrides = all(`SELECT * FROM debt_overrides`);
 await withTransaction(async (client) => {
   for (const a of accounts) {
     await client.query(
-      `INSERT INTO accounts (account_id, name, institution_name, type, subtype, current_balance, iso_currency, updated_at)
+      `INSERT INTO accounts (account_id, name, institution_name, type, subtype, anchor_balance, iso_currency, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (account_id) DO UPDATE SET
          name = excluded.name, institution_name = excluded.institution_name, type = excluded.type,
-         subtype = excluded.subtype, current_balance = excluded.current_balance,
+         subtype = excluded.subtype, anchor_balance = excluded.anchor_balance,
          iso_currency = excluded.iso_currency, updated_at = excluded.updated_at`,
       [a.account_id, a.name, a.institution_name, a.type, a.subtype, a.current_balance ?? 0, currency(a.iso_currency), timestamp(a.updated_at)],
     );

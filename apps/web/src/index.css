@@ -62,7 +62,10 @@ h2 { margin-top: 0; }
 .table .group-row td { font-weight: 600; padding-top: 16px; }
 .table .header-row td { font-weight: 600; }
 .table .skipped-row td { opacity: 0.45; }
+/* One line per row in the import preview; the wrapper scrolls sideways. */
+.preview-table th, .preview-table td { white-space: nowrap; }
 .right { text-align: right; }
+.small-note { font-size: 12px; margin-top: 4px; display: block; }
 
 .muted { color: var(--muted); }
 .error { color: var(--neg); }

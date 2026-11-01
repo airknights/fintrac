@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   type Account,
@@ -9,6 +9,7 @@ import {
   type ImportResult,
   type NetWorth,
   type SpendingResponse,
+  type TransactionsResponse,
 } from "../api/client.js";
 
 function invalidateAll(qc: ReturnType<typeof useQueryClient>) {
@@ -16,6 +17,27 @@ function invalidateAll(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["accounts"] });
   qc.invalidateQueries({ queryKey: ["spending"] });
   qc.invalidateQueries({ queryKey: ["debts"] });
+  qc.invalidateQueries({ queryKey: ["transactions"] });
+}
+
+const TRANSACTIONS_PAGE = 100;
+
+// Newest first, a page at a time ("Load more").
+export function useTransactions(filters: { accountId?: string; search?: string }) {
+  return useInfiniteQuery({
+    queryKey: ["transactions", filters],
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams({ limit: String(TRANSACTIONS_PAGE), offset: String(pageParam) });
+      if (filters.accountId) params.set("accountId", filters.accountId);
+      if (filters.search) params.set("q", filters.search);
+      return api.get<TransactionsResponse>(`/transactions?${params}`);
+    },
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.transactions.length, 0);
+      return loaded < last.total ? loaded : undefined;
+    },
+  });
 }
 
 export function useNetWorth() {
@@ -53,6 +75,7 @@ export interface CreateAccountPayload {
   subtype?: string | null;
   isoCurrency?: string;
   openingBalance?: number;
+  availableCredit?: number | null;
 }
 
 export function useCreateAccount() {
@@ -66,17 +89,26 @@ export function useCreateAccount() {
 export function useUpdateBalance() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { accountId: string; balance: number }) =>
-      api.patch(`/accounts/${payload.accountId}/balance`, { balance: payload.balance }),
+    // Either or both, as the bank shows them today.
+    mutationFn: ({ accountId, ...update }: { accountId: string; balance?: number; availableCredit?: number | null }) =>
+      api.patch(`/accounts/${accountId}/balance`, update),
     onSuccess: () => invalidateAll(qc),
   });
 }
 
-export function useUpdateInstitution() {
+// Edit bank / type / subtype (any subset).
+export function useUpdateAccount() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { accountId: string; institutionName: string | null }) =>
-      api.patch(`/accounts/${payload.accountId}/institution`, { institutionName: payload.institutionName }),
+    mutationFn: ({
+      accountId,
+      ...fields
+    }: {
+      accountId: string;
+      institutionName?: string | null;
+      type?: string;
+      subtype?: string | null;
+    }) => api.patch(`/accounts/${accountId}`, fields),
     onSuccess: () => invalidateAll(qc),
   });
 }

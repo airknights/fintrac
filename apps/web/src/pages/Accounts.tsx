@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import type { Account, ImportMapping, ImportResult } from "../api/client.js";
 import {
   useAccounts,
@@ -7,11 +8,12 @@ import {
   useImportPreview,
   useImportTransactions,
   useUpdateBalance,
-  useUpdateInstitution,
+  useUpdateAccount,
 } from "../hooks/api.js";
 import { money, titleCase } from "../format.js";
 import { DEBT_TYPES, groupByInstitution, inferAccountKind, inferInstitution } from "../accounts.js";
 import { InstitutionPicker } from "../components/InstitutionPicker.js";
+import { guessColumns, guessHeaderRow } from "../importGuess.js";
 
 const TYPES = ["depository", "credit", "loan", "investment", "other"];
 
@@ -77,6 +79,7 @@ function AddAccountForm() {
   const [kindPickedByUser, setKindPickedByUser] = useState(false);
   const kindGuessed = !kindPickedByUser && subtype !== "";
   const [openingBalance, setOpeningBalance] = useState("0");
+  const [availableCredit, setAvailableCredit] = useState("");
 
   function handleNameChange(value: string) {
     setName(value);
@@ -98,6 +101,7 @@ function AddAccountForm() {
         type,
         subtype: subtype.trim() || null,
         openingBalance: Number(openingBalance) || 0,
+        availableCredit: type === "credit" && availableCredit.trim() !== "" ? Number(availableCredit) : null,
       },
       {
         onSuccess: () => {
@@ -107,6 +111,7 @@ function AddAccountForm() {
           setSubtype("");
           setKindPickedByUser(false);
           setOpeningBalance("0");
+          setAvailableCredit("");
         },
       },
     );
@@ -163,8 +168,8 @@ function AddAccountForm() {
           />
         </label>
         {kindGuessed && <span className="muted" style={{ alignSelf: "center" }}>guessed from name</span>}
-        <label>
-          Opening balance{" "}
+        <label title="As your bank shows it today. Leave 0 to take it from an imported CSV's balance column.">
+          {DEBT_TYPES.has(type) ? "Current balance owed" : "Current balance"}{" "}
           <input
             type="number"
             value={openingBalance}
@@ -172,6 +177,18 @@ function AddAccountForm() {
             onChange={(e) => setOpeningBalance(e.target.value)}
           />
         </label>
+        {type === "credit" && (
+          <label>
+            Available credit{" "}
+            <input
+              type="number"
+              value={availableCredit}
+              step="0.01"
+              placeholder="optional"
+              onChange={(e) => setAvailableCredit(e.target.value)}
+            />
+          </label>
+        )}
       </div>
       <div style={{ marginTop: 12 }}>
         <button className="btn primary" type="submit" disabled={create.isPending}>
@@ -187,11 +204,16 @@ function AccountRow({ account }: { account: Account }) {
   const updateBalance = useUpdateBalance();
   const deleteAccount = useDeleteAccount();
   const [balance, setBalance] = useState(String(account.current_balance ?? 0));
+  const [available, setAvailable] = useState(account.available_credit === null ? "" : String(account.available_credit));
   const [importing, setImporting] = useState(false);
-  const [editingBank, setEditingBank] = useState(false);
+  const [editing, setEditing] = useState(false);
 
-  // Pick up balance changes made elsewhere (e.g. set from an imported CSV).
+  // Pick up changes made elsewhere (imports move the balance and available credit).
   useEffect(() => setBalance(String(account.current_balance ?? 0)), [account.current_balance]);
+  useEffect(
+    () => setAvailable(account.available_credit === null ? "" : String(account.available_credit)),
+    [account.available_credit],
+  );
 
   return (
     <>
@@ -211,13 +233,38 @@ function AccountRow({ account }: { account: Account }) {
               }
             }}
           />
+          <div className="muted small-note">
+            {account.balance_as_of ? `as of ${account.balance_as_of} + later transactions` : "from transactions"}
+          </div>
+          {account.type === "credit" && (
+            <label className="small-note">
+              Available{" "}
+              <input
+                type="number"
+                value={available}
+                placeholder="—"
+                style={{ width: 100 }}
+                onChange={(e) => setAvailable(e.target.value)}
+                onBlur={() => {
+                  const n = available.trim() === "" ? null : Number(available);
+                  if (n !== null && Number.isNaN(n)) return;
+                  if (n !== account.available_credit) {
+                    updateBalance.mutate({ accountId: account.account_id, availableCredit: n });
+                  }
+                }}
+              />
+            </label>
+          )}
         </td>
         <td className="right">
+          <Link className="btn small" to={`/transactions?account=${account.account_id}`}>
+            Transactions
+          </Link>
           <button className="btn small" onClick={() => setImporting((v) => !v)}>
             {importing ? "Close" : "Import CSV"}
           </button>
-          <button className="btn small" onClick={() => setEditingBank((v) => !v)}>
-            Change bank
+          <button className="btn small" onClick={() => setEditing((v) => !v)}>
+            {editing ? "Close" : "Edit"}
           </button>
           <button
             className="btn small"
@@ -231,10 +278,10 @@ function AccountRow({ account }: { account: Account }) {
           </button>
         </td>
       </tr>
-      {editingBank && (
+      {editing && (
         <tr>
           <td colSpan={4}>
-            <EditBankForm account={account} onDone={() => setEditingBank(false)} />
+            <EditAccountForm account={account} onDone={() => setEditing(false)} />
           </td>
         </tr>
       )}
@@ -249,28 +296,63 @@ function AccountRow({ account }: { account: Account }) {
   );
 }
 
-function EditBankForm({ account, onDone }: { account: Account; onDone: () => void }) {
-  const update = useUpdateInstitution();
+function EditAccountForm({ account, onDone }: { account: Account; onDone: () => void }) {
+  const update = useUpdateAccount();
   const [institutionName, setInstitutionName] = useState(account.institution_name ?? "");
+  const [type, setType] = useState(account.type);
+  const [subtype, setSubtype] = useState(account.subtype ?? "");
+  // The stored balance is "money in the account" for bank types but "amount
+  // owed" for credit/loan, so switching between them flips its meaning.
+  const debtChanged = DEBT_TYPES.has(type) !== DEBT_TYPES.has(account.type);
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     update.mutate(
-      { accountId: account.account_id, institutionName: institutionName.trim() || null },
+      {
+        accountId: account.account_id,
+        institutionName: institutionName.trim() || null,
+        type,
+        subtype: subtype.trim() || null,
+      },
       { onSuccess: onDone },
     );
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <InstitutionPicker label={`Bank for ${account.name}`} value={institutionName} onChange={setInstitutionName} />
-      <button className="btn primary small" type="submit" disabled={update.isPending}>
-        {update.isPending ? "Saving…" : "Save"}
-      </button>
-      <button className="btn small" type="button" onClick={onDone}>
-        Cancel
-      </button>
-      {update.error && <span className="error">{(update.error as Error).message}</span>}
+    <form onSubmit={handleSubmit}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <strong>Edit {account.name}</strong>
+        <InstitutionPicker label="Bank" value={institutionName} onChange={setInstitutionName} />
+        <label>
+          Type{" "}
+          <select value={type} onChange={(e) => setType(e.target.value)}>
+            {TYPES.map((t) => (
+              <option key={t} value={t}>
+                {titleCase(t)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Subtype{" "}
+          <input type="text" value={subtype} onChange={(e) => setSubtype(e.target.value)} placeholder="chequing" />
+        </label>
+        <button className="btn primary small" type="submit" disabled={update.isPending}>
+          {update.isPending ? "Saving…" : "Save"}
+        </button>
+        <button className="btn small" type="button" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+      {debtChanged && (
+        <p className="muted" style={{ marginBottom: 0 }}>
+          {DEBT_TYPES.has(type)
+            ? `The balance (${money(account.current_balance)}) will be read as the amount owed. `
+            : `The balance (${money(account.current_balance)}) will be read as money in the account, not owed. `}
+          Check it after saving and correct it if needed.
+        </p>
+      )}
+      {update.error && <p className="error">{(update.error as Error).message}</p>}
     </form>
   );
 }
@@ -287,7 +369,24 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
     saved ?? { dateFormat: "YMD", headerRow: 0, dataStartRow: 1 },
   );
   const [result, setResult] = useState<ImportResult | null>(null);
+  const [columnsGuessed, setColumnsGuessed] = useState(false);
+  // Sliding window over the file's transaction rows (indexes into txRows below).
+  const [windowStart, setWindowStart] = useState(0);
+  const [windowEnd, setWindowEnd] = useState(PREVIEW_PAGE);
   const preview = useImportPreview();
+
+  // Replace the column choices with a best guess for the given header row.
+  function applyGuess(rows: string[][], columnCount: number, header: number | null) {
+    const dataStart = header === null ? 0 : header + 1;
+    const { amountMode: mode, ...cols } = guessColumns(
+      header === null ? null : (rows[header] ?? null),
+      rows.slice(dataStart),
+      columnCount,
+    );
+    setAmountMode(mode);
+    setMapping((m) => ({ dateFormat: m.dateFormat, ...cols, headerRow: header, dataStartRow: dataStart }));
+    setColumnsGuessed(true);
+  }
   const doImport = useImportTransactions();
 
   async function handleFiles(e: ChangeEvent<HTMLInputElement>) {
@@ -302,9 +401,8 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       { accountId, csv: texts[0]! },
       {
         onSuccess: (data) => {
-          if (saved) return; // keep the rows the user chose last time
-          const header = guessHeaderRow(data.rows, data.columnCount);
-          setMapping((m) => ({ ...m, headerRow: header, dataStartRow: header + 1 }));
+          if (saved) return; // keep the settings the user chose last time
+          applyGuess(data.rows, data.columnCount, guessHeaderRow(data.rows, data.columnCount));
         },
       },
     );
@@ -332,6 +430,24 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
     { length: columnCount },
     (_, i) => (headerRow !== null && rawRows[headerRow]?.[i]?.trim()) || `Column ${i + 1}`,
   );
+  // Only the first rows can sensibly be the header / first transaction.
+  const pickableRows = rawRows.slice(0, Math.max(PREVIEW_PAGE, dataStartRow + 1, (headerRow ?? 0) + 1));
+  const txRows = rawRows.slice(dataStartRow);
+  const visibleTx = txRows.slice(windowStart, windowEnd);
+  const shownEnd = Math.min(windowEnd, txRows.length);
+
+  // Back to the first page whenever a new file is previewed or the start row moves.
+  useEffect(() => {
+    setWindowStart(0);
+    setWindowEnd(PREVIEW_PAGE);
+  }, [preview.data, dataStartRow]);
+
+  function loadMore(count: number) {
+    const end = Math.min(txRows.length, windowEnd + count);
+    setWindowEnd(end);
+    setWindowStart((start) => Math.max(start, end - PREVIEW_MAX_VISIBLE)); // drop rows off the top
+  }
+
   const rowLabel = (i: number) => {
     const text = (rawRows[i] ?? []).filter((c) => c.trim()).slice(0, 3).join(" · ");
     return `Row ${i + 1}${text ? `: ${text.length > 40 ? text.slice(0, 40) + "…" : text}` : ""}`;
@@ -357,7 +473,9 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
   );
 
   return (
-    <div className="card">
+    // width 0 + min-width 100%: take the table cell's width instead of growing
+    // it to fit wide previews, so the preview below can scroll horizontally.
+    <div className="card" style={{ width: 0, minWidth: "100%" }}>
       <h3>
         Import transactions into {account.name}{" "}
         <span className="muted">({isDebt ? "credit card / loan" : "bank account"})</span>
@@ -380,12 +498,12 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
               <select
                 value={headerRow ?? ""}
                 onChange={(e) => {
-                  const h = e.target.value === "" ? null : Number(e.target.value);
-                  setMapping((m) => ({ ...m, headerRow: h, dataStartRow: h === null ? 0 : h + 1 }));
+                  // Column names changed, so re-guess which column is which.
+                  applyGuess(rawRows, columnCount, e.target.value === "" ? null : Number(e.target.value));
                 }}
               >
                 <option value="">No header row</option>
-                {rawRows.map((_, i) => (
+                {pickableRows.map((_, i) => (
                   <option key={i} value={i}>
                     {rowLabel(i)}
                   </option>
@@ -398,7 +516,7 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
                 value={dataStartRow}
                 onChange={(e) => setMapping((m) => ({ ...m, dataStartRow: Number(e.target.value) }))}
               >
-                {rawRows.map((_, i) => (
+                {pickableRows.map((_, i) => (
                   <option key={i} value={i}>
                     {rowLabel(i)}
                   </option>
@@ -408,9 +526,16 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
           </div>
           <p className="muted" style={{ margin: "6px 0" }}>
             Rows above the transactions (other than the column names) are skipped.
+            {columnsGuessed && " Columns below were picked automatically — check them before importing."}
+          </p>
+          <p className="muted" style={{ margin: "6px 0" }}>
+            {txRows.length === 0
+              ? "No transaction rows."
+              : `Showing transactions ${windowStart + 1}–${shownEnd} of ${txRows.length}`}
+            {windowStart > 0 && " (earlier rows hidden to keep the page fast)"}
           </p>
           <div style={{ overflowX: "auto" }}>
-            <table className="table">
+            <table className="table preview-table">
               <thead>
                 <tr>
                   <th>Row</th>
@@ -420,23 +545,44 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
                 </tr>
               </thead>
               <tbody>
-                {rawRows.map((row, i) => (
-                  <tr
-                    key={i}
-                    className={i === headerRow ? "header-row" : i < dataStartRow ? "skipped-row" : undefined}
-                  >
-                    <td className="muted">
-                      {i + 1}
-                      {i === headerRow ? " · names" : i < dataStartRow ? " · skipped" : ""}
-                    </td>
-                    {Array.from({ length: columnCount }, (_, j) => (
-                      <td key={j}>{row[j] ?? ""}</td>
-                    ))}
-                  </tr>
-                ))}
+                {/* Header and skipped rows sit above the transactions; show them until the window moves past. */}
+                {windowStart === 0 &&
+                  rawRows.slice(0, dataStartRow).map((row, i) => (
+                    <tr key={`pre-${i}`} className={i === headerRow ? "header-row" : "skipped-row"}>
+                      <td className="muted">
+                        {i + 1}
+                        {i === headerRow ? " · names" : " · skipped"}
+                      </td>
+                      {Array.from({ length: columnCount }, (_, j) => (
+                        <td key={j}>{row[j] ?? ""}</td>
+                      ))}
+                    </tr>
+                  ))}
+                {visibleTx.map((row, k) => {
+                  const rowNumber = dataStartRow + windowStart + k + 1;
+                  return (
+                    <tr key={rowNumber}>
+                      <td className="muted">{rowNumber}</td>
+                      {Array.from({ length: columnCount }, (_, j) => (
+                        <td key={j}>{row[j] ?? ""}</td>
+                      ))}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
+          {shownEnd < txRows.length && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+              <button className="btn small" type="button" onClick={() => loadMore(PREVIEW_PAGE)}>
+                Load more
+              </button>
+              <button className="btn small" type="button" onClick={() => loadMore(100)}>
+                Load next 100
+              </button>
+              <span className="muted">{txRows.length - shownEnd} more</span>
+            </div>
+          )}
 
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12 }}>
             <ColSelect
@@ -535,27 +681,34 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
           Imported {result.imported} transaction(s)
           {result.files > 1 && ` from ${result.files} files`}
           {result.skipped > 0 && `, skipped ${result.skipped} row(s) with an unparseable date`}.
-          {result.balance !== null && ` Balance set to ${money(result.balance)} (as of ${result.balanceDate}).`}
+          {result.balance !== null && ` Current balance: ${money(result.balance)}`}
+          {result.balanceDate && ` (from the file's balance on ${result.balanceDate}, plus anything later)`}
+          {result.balance !== null && "."}
         </p>
       )}
+      {result?.balanceCheck &&
+        (result.balanceCheck.mismatches === 0 ? (
+          <p className="pos">
+            Balance check passed: every row's amount matches the change in the bank's balance (
+            {result.balanceCheck.checked} checked).
+          </p>
+        ) : (
+          <p className="error">
+            Balance check: {result.balanceCheck.mismatches} of {result.balanceCheck.checked} rows don't match the
+            change in the bank's balance (first on {result.balanceCheck.firstMismatchDate}).
+            {result.balanceCheck.mismatches === result.balanceCheck.checked
+              ? " Every row is off — the money in/out columns are probably swapped, or 'Flip sign' needs changing."
+              : " The file may be missing transactions, or rows on the same day are out of order."}
+          </p>
+        ))}
       {preview.error && <p className="error">{(preview.error as Error).message}</p>}
       {doImport.error && <p className="error">{(doImport.error as Error).message}</p>}
     </div>
   );
 }
 
-// Header row guess: the first row filled across (nearly) every column whose
-// cells are all text, i.e. no dates or amounts. Account-info lines above the
-// header usually have only a cell or two.
-function guessHeaderRow(rows: string[][], columnCount: number): number {
-  const looksLikeData = (cell: string) => /\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}/.test(cell) || /^-?\$?[\d,]+\.\d{2}$/.test(cell.trim());
-  const minFilled = Math.max(2, Math.ceil(columnCount * 0.6));
-  const index = rows.findIndex((r) => {
-    const filled = r.filter((c) => c.trim());
-    return filled.length >= minFilled && !filled.some(looksLikeData);
-  });
-  return index === -1 ? 0 : index;
-}
+const PREVIEW_PAGE = 20; // transactions per "Load more"
+const PREVIEW_MAX_VISIBLE = 150; // cap on transactions rendered at once
 
 function ColSelect({
   label,

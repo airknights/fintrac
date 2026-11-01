@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { query } from "../db/index.js";
-import { setDebtOverride } from "../db/queries.js";
+import { ACCOUNTS_SQL, setDebtOverride } from "../db/queries.js";
 import { buildDebtPlan, type Debt } from "../services/debtPlanner.js";
 
 export const debtRoutes = new Hono();
@@ -23,7 +23,7 @@ function loadDebtRows(): Promise<DebtRow[]> {
               COALESCE(a.current_balance, 0) AS balance,
               o.apr_percentage AS apr,
               o.minimum_payment AS minimum
-       FROM accounts a
+       FROM (${ACCOUNTS_SQL}) a
        LEFT JOIN debt_overrides o ON o.account_id = a.account_id
        WHERE a.type IN ('credit','loan')
        ORDER BY balance DESC`,

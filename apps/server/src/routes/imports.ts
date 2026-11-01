@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { query, withTransaction } from "../db/index.js";
-import { upsertTransaction, type TransactionInput } from "../db/queries.js";
+import { ACCOUNTS_SQL, upsertTransaction, type TransactionInput } from "../db/queries.js";
 
 export const importRoutes = new Hono();
 
@@ -59,9 +59,10 @@ function parseCsv(text: string): string[][] {
 }
 
 const previewSchema = z.object({ csv: z.string().min(1) });
-const PREVIEW_ROWS = 20;
+// The client windows the preview itself, so send every row (capped for sanity).
+const PREVIEW_MAX_ROWS = 50_000;
 
-// Returns the first rows raw so the user can pick which row holds the column
+// Returns the file's rows raw so the user can pick which row holds the column
 // names and where transactions start (some files have account info above the
 // header, e.g. CTFS; some have no header at all, e.g. TD).
 importRoutes.post("/accounts/:id/import-preview", async (c) => {
@@ -71,8 +72,9 @@ importRoutes.post("/accounts/:id/import-preview", async (c) => {
   const rows = parseCsv(parsed.data.csv);
   if (rows.length === 0) return c.json({ error: "CSV file is empty" }, 400);
 
-  const sample = rows.slice(0, PREVIEW_ROWS);
-  return c.json({ rows: sample, columnCount: Math.max(...sample.map((r) => r.length)) });
+  const sample = rows.slice(0, PREVIEW_MAX_ROWS);
+  const columnCount = sample.reduce((max, r) => Math.max(max, r.length), 0);
+  return c.json({ rows: sample, columnCount });
 });
 
 const dateFormats = z.enum(["YMD", "MDY", "DMY"]);
@@ -153,17 +155,16 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   if (!account) return c.json({ error: "Account not found" }, 404);
 
   const { csvs, mapping } = parsed.data;
+  const isDebt = DEBT_TYPES.has(account.type);
   const toImport: TransactionInput[] = [];
   let skipped = 0;
-  // Most recent running balance seen across all files, if a balance column is mapped.
-  let latest: { date: string; balance: number } | null = null;
+  // Each file's rows in chronological order (oldest first), with the bank's
+  // running balance when a balance column is mapped.
+  const files: Array<Array<{ date: string; amount: number; balance: number | null }>> = [];
 
   for (const csv of csvs) {
-    const rows = parseCsv(csv);
-    const dataRows = rows.slice(dataStartRow(mapping));
-
-    const parsedRows: Array<{ date: string; balance: number | null }> = [];
-    for (const row of dataRows) {
+    const parsedRows: Array<TransactionInput & { balance: number | null }> = [];
+    for (const row of parseCsv(csv).slice(dataStartRow(mapping))) {
       const date = normalizeDate(row[mapping.dateCol] ?? "", mapping.dateFormat);
       const name = (row[mapping.nameCol] ?? "").trim() || null;
       if (!date) {
@@ -181,28 +182,58 @@ importRoutes.post("/accounts/:id/import", async (c) => {
         if (mapping.flipSign) amount = -amount;
       }
 
-      toImport.push({ accountId, name, amount, date, isoCurrency: null, category: null });
       const balance = mapping.balanceCol !== undefined ? parseOptionalAmount(row[mapping.balanceCol]) : null;
-      parsedRows.push({ date, balance });
+      parsedRows.push({ accountId, name, amount, date, isoCurrency: null, category: null, balance });
     }
 
-    // Banks list rows newest-first or oldest-first. Walk in chronological
-    // order so that, for same-day rows, the last one seen is that day's
-    // closing balance.
+    // Banks list rows newest-first or oldest-first; normalize to oldest-first
+    // so same-day rows keep the bank's order.
     const first = parsedRows[0];
     const last = parsedRows[parsedRows.length - 1];
-    const chronological = first && last && first.date > last.date ? [...parsedRows].reverse() : parsedRows;
-    for (const r of chronological) {
-      if (r.balance !== null && (!latest || r.date >= latest.date)) latest = { date: r.date, balance: r.balance };
-    }
+    const chronological = first && last && first.date > last.date ? parsedRows.reverse() : parsedRows;
+    for (const { balance: _, ...t } of chronological) toImport.push(t);
+    files.push(chronological.map((r) => ({ date: r.date, amount: r.amount, balance: r.balance })));
   }
 
   if (toImport.length === 0) {
     return c.json({ error: "No rows with a valid date — check the date column and format" }, 400);
   }
 
-  // Debts are stored as a positive amount owed, whatever sign the bank uses.
-  const newBalance = latest ? (DEBT_TYPES.has(account.type) ? Math.abs(latest.balance) : latest.balance) : null;
+  // Bank balance → our convention. Banks are positive-in-the-black; card and
+  // loan balances may be shown as + owed or - owed, so go by the majority.
+  const allBalances = files.flat().flatMap((r) => (r.balance === null || r.balance === 0 ? [] : [r.balance]));
+  const owedShownNegative = isDebt && allBalances.filter((b) => b < 0).length > allBalances.length / 2;
+  const toOurBalance = (b: number) => (owedShownNegative ? -b : b);
+  // How a transaction should move our balance (amount is + for money out).
+  const delta = (amount: number) => (isDebt ? amount : -amount);
+
+  // Newest balance in the files becomes the account's anchor balance.
+  let latest: { date: string; balance: number } | null = null;
+  for (const rows of files) {
+    for (const r of rows) {
+      if (r.balance !== null && (!latest || r.date >= latest.date)) latest = { date: r.date, balance: toOurBalance(r.balance) };
+    }
+  }
+
+  // Balance check: each row's amount should explain the change in the bank's
+  // running balance from the row before. Mismatches mean missing rows or
+  // mis-mapped / mis-signed amount columns.
+  let checked = 0;
+  let mismatches = 0;
+  let firstMismatchDate: string | null = null;
+  for (const rows of files) {
+    for (let i = 1; i < rows.length; i++) {
+      const prev = rows[i - 1]!;
+      const cur = rows[i]!;
+      if (prev.balance === null || cur.balance === null) continue;
+      checked++;
+      const change = toOurBalance(cur.balance) - toOurBalance(prev.balance);
+      if (Math.abs(change - delta(cur.amount)) > 0.005) {
+        mismatches++;
+        firstMismatchDate ??= cur.date;
+      }
+    }
+  }
 
   // One transaction so a failed import leaves no partial rows behind.
   await withTransaction(async (client) => {
@@ -210,19 +241,25 @@ importRoutes.post("/accounts/:id/import", async (c) => {
     await client.query(
       `UPDATE accounts
        SET import_mapping = $1,
-           current_balance = COALESCE($2, current_balance),
+           -- Re-anchor only if the file's balance is at least as recent as the
+           -- one we have (an old statement must not undo a balance typed today).
+           anchor_balance = CASE WHEN $3::date >= COALESCE(balance_as_of, '-infinity') THEN $2 ELSE anchor_balance END,
+           balance_as_of = CASE WHEN $3::date >= COALESCE(balance_as_of, '-infinity') THEN $3::date ELSE balance_as_of END,
            updated_at = now()
-       WHERE account_id = $3`,
-      [JSON.stringify(mapping), newBalance, accountId],
+       WHERE account_id = $4`,
+      [JSON.stringify(mapping), latest?.balance ?? null, latest?.date ?? null, accountId],
     );
   });
+
+  const [updated] = await query<{ current_balance: number }>(`${ACCOUNTS_SQL} WHERE a.account_id = $1`, [accountId]);
 
   return c.json({
     imported: toImport.length,
     skipped,
     files: csvs.length,
-    balance: newBalance,
-    balanceDate: latest?.date ?? null,
+    balance: updated?.current_balance ?? null, // current balance after the import
+    balanceDate: latest?.date ?? null, // set when the file's balance column re-anchored the account
+    balanceCheck: checked > 0 ? { checked, mismatches, firstMismatchDate } : null,
     accountId,
   });
 });

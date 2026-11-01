@@ -1,8 +1,28 @@
 import { randomUUID, createHash } from "node:crypto";
 import type pg from "pg";
-import { pool, query } from "./index.js";
+import { pool, query, withTransaction } from "./index.js";
 
 // ── Accounts ───────────────────────────────────────────────────
+// How a transaction moves an account's balance. amount is + for money out:
+// that lowers a bank balance but raises what's owed on a card or loan.
+export const DELTA_SQL = `CASE WHEN a.type IN ('credit','loan') THEN t.amount ELSE -t.amount END`;
+
+// Accounts with balances derived from the transactions: the anchor balance
+// (as of balance_as_of) plus every transaction dated after it. With no
+// balance_as_of (never set), every transaction counts.
+export const ACCOUNTS_SQL = `
+  SELECT a.account_id, a.name, a.institution_name, a.type, a.subtype, a.iso_currency,
+         a.import_mapping, a.updated_at, a.anchor_balance, a.balance_as_of, a.credit_limit,
+         a.anchor_balance + COALESCE(later.delta, 0) AS current_balance,
+         CASE WHEN a.type = 'credit' AND a.credit_limit IS NOT NULL
+              THEN a.credit_limit - (a.anchor_balance + COALESCE(later.delta, 0)) END AS available_credit
+  FROM accounts a
+  LEFT JOIN LATERAL (
+    SELECT SUM(${DELTA_SQL}) AS delta
+    FROM transactions t
+    WHERE t.account_id = a.account_id AND (a.balance_as_of IS NULL OR t.date > a.balance_as_of)
+  ) later ON true`;
+
 export interface CreateAccountInput {
   name: string;
   institutionName?: string | null;
@@ -10,38 +30,76 @@ export interface CreateAccountInput {
   subtype?: string | null;
   isoCurrency?: string | null;
   openingBalance?: number | null;
+  availableCredit?: number | null; // credit cards only
 }
 
 export async function createAccount(input: CreateAccountInput): Promise<string> {
   const accountId = randomUUID();
+  // A typed balance is today's; none (or 0) means "not known yet" — the first
+  // imported balance column or typed balance will anchor it.
+  const balance = input.openingBalance ?? 0;
+  const balanceKnown = balance !== 0;
+  const creditLimit = input.type === "credit" && input.availableCredit != null ? input.availableCredit + balance : null;
   await query(
-    `INSERT INTO accounts (account_id, name, institution_name, type, subtype, current_balance, iso_currency, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+    `INSERT INTO accounts (account_id, name, institution_name, type, subtype, anchor_balance, balance_as_of,
+                           credit_limit, iso_currency, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $9 THEN CURRENT_DATE END, $7, $8, now())`,
     [
       accountId,
       input.name,
       input.institutionName ?? null,
       input.type,
       input.subtype ?? null,
-      input.openingBalance ?? 0,
+      balance,
+      creditLimit,
       input.isoCurrency ?? "CAD",
+      balanceKnown,
     ],
   );
   return accountId;
 }
 
-export async function updateAccountBalance(accountId: string, balance: number): Promise<void> {
-  await query(`UPDATE accounts SET current_balance = $1, updated_at = now() WHERE account_id = $2`, [
-    balance,
-    accountId,
-  ]);
+// The user typed the balance (and, for cards, available credit) as their bank
+// shows it today. Transactions up to today are taken as already included.
+// Returns false if no such account.
+export async function updateAccountBalance(
+  accountId: string,
+  update: { balance?: number; availableCredit?: number | null },
+): Promise<boolean> {
+  return withTransaction(async (client) => {
+    if (update.balance !== undefined) {
+      await client.query(
+        `UPDATE accounts SET anchor_balance = $1, balance_as_of = CURRENT_DATE, updated_at = now() WHERE account_id = $2`,
+        [update.balance, accountId],
+      );
+    }
+    const { rows } = await client.query(`${ACCOUNTS_SQL} WHERE a.account_id = $1`, [accountId]);
+    const account = rows[0];
+    if (!account) return false;
+    if (update.availableCredit !== undefined) {
+      // Banks show balance + available credit; the limit is their sum.
+      const limit = update.availableCredit === null ? null : update.availableCredit + account.current_balance;
+      await client.query(`UPDATE accounts SET credit_limit = $1, updated_at = now() WHERE account_id = $2`, [
+        limit,
+        accountId,
+      ]);
+    }
+    return true;
+  });
 }
 
-// Returns false if no such account.
-export async function updateAccountInstitution(accountId: string, institutionName: string | null): Promise<boolean> {
+// Updates only the fields given (undefined = leave as is). Returns false if no such account.
+export async function updateAccountDetails(
+  accountId: string,
+  fields: { institutionName?: string | null; type?: string; subtype?: string | null },
+): Promise<boolean> {
+  const columns = { institution_name: fields.institutionName, type: fields.type, subtype: fields.subtype };
+  const set = Object.entries(columns).filter(([, v]) => v !== undefined);
+  const assignments = set.map(([col], i) => `${col} = $${i + 1}`).join(", ");
   const rows = await query(
-    `UPDATE accounts SET institution_name = $1, updated_at = now() WHERE account_id = $2 RETURNING account_id`,
-    [institutionName, accountId],
+    `UPDATE accounts SET ${assignments}${set.length ? ", " : ""}updated_at = now()
+     WHERE account_id = $${set.length + 1} RETURNING account_id`,
+    [...set.map(([, v]) => v), accountId],
   );
   return rows.length > 0;
 }
@@ -51,7 +109,7 @@ export async function deleteAccount(accountId: string): Promise<void> {
 }
 
 export function getAccounts(): Promise<any[]> {
-  return query(`SELECT * FROM accounts ORDER BY type, name`);
+  return query(`${ACCOUNTS_SQL} ORDER BY a.type, a.name`);
 }
 
 // ── Transactions ───────────────────────────────────────────────
