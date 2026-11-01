@@ -108,6 +108,7 @@ export function useUpdateAccount() {
       institutionName?: string | null;
       type?: string;
       subtype?: string | null;
+      creditLimit?: number | null;
     }) => api.patch(`/accounts/${accountId}`, fields),
     onSuccess: () => invalidateAll(qc),
   });

@@ -307,6 +307,7 @@ function EditAccountForm({ account, onDone }: { account: Account; onDone: () => 
   const [institutionName, setInstitutionName] = useState(account.institution_name ?? "");
   const [type, setType] = useState(account.type);
   const [subtype, setSubtype] = useState(account.subtype ?? "");
+  const [creditLimit, setCreditLimit] = useState(account.credit_limit === null ? "" : String(account.credit_limit));
   // The stored balance is "money in the account" for bank types but "amount
   // owed" for credit/loan, so switching between them flips its meaning.
   const debtChanged = DEBT_TYPES.has(type) !== DEBT_TYPES.has(account.type);
@@ -319,6 +320,8 @@ function EditAccountForm({ account, onDone }: { account: Account; onDone: () => 
         institutionName: institutionName.trim() || null,
         type,
         subtype: subtype.trim() || null,
+        // Only cards / lines of credit have a limit; blank clears it.
+        ...(type === "credit" ? { creditLimit: creditLimit.trim() === "" ? null : Number(creditLimit) } : {}),
       },
       { onSuccess: onDone },
     );
@@ -343,6 +346,20 @@ function EditAccountForm({ account, onDone }: { account: Account; onDone: () => 
           Subtype{" "}
           <input type="text" value={subtype} onChange={(e) => setSubtype(e.target.value)} placeholder="chequing" />
         </label>
+        {type === "credit" && (
+          <label title="Available credit is worked out as limit minus balance owed.">
+            Credit limit{" "}
+            <input
+              type="number"
+              value={creditLimit}
+              step="0.01"
+              min="0"
+              placeholder="e.g. 5000"
+              style={{ width: 110 }}
+              onChange={(e) => setCreditLimit(e.target.value)}
+            />
+          </label>
+        )}
         <button className="btn primary small" type="submit" disabled={update.isPending}>
           {update.isPending ? "Saving…" : "Save"}
         </button>

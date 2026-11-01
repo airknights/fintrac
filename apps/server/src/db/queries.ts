@@ -101,9 +101,14 @@ export async function updateAccountBalance(
 // Updates only the fields given (undefined = leave as is). Returns false if no such account.
 export async function updateAccountDetails(
   accountId: string,
-  fields: { institutionName?: string | null; type?: string; subtype?: string | null },
+  fields: { institutionName?: string | null; type?: string; subtype?: string | null; creditLimit?: number | null },
 ): Promise<boolean> {
-  const columns = { institution_name: fields.institutionName, type: fields.type, subtype: fields.subtype };
+  const columns = {
+    institution_name: fields.institutionName,
+    type: fields.type,
+    subtype: fields.subtype,
+    credit_limit: fields.creditLimit,
+  };
   const set = Object.entries(columns).filter(([, v]) => v !== undefined);
   const assignments = set.map(([col], i) => `${col} = $${i + 1}`).join(", ");
   const rows = await query(
