@@ -34,7 +34,8 @@ export function guessHeaderRow(rows: string[][], columnCount: number): number | 
 }
 
 // Header-name patterns, most specific first. Transaction date beats posted date.
-const NAME_PATTERNS: Record<"date" | "name" | "amount" | "debit" | "credit" | "available" | "balance", RegExp[]> = {
+const NAME_PATTERNS: Record<"date" | "name" | "amount" | "debit" | "credit" | "available" | "balance" | "interest", RegExp[]> = {
+  interest: [/interest/i],
   date: [/trans(action)?\.?\s*date/i, /^date$/i, /\bdate\b/i],
   name: [/description|details|narrative/i, /merchant|payee/i, /memo|name/i],
   amount: [/^amount$/i, /\bamount\b/i],
@@ -60,7 +61,7 @@ export function guessColumns(
   headerCells: string[] | null,
   dataRows: string[][],
   columnCount: number,
-  { creditCard = false }: { creditCard?: boolean } = {},
+  { creditCard = false, creditLine = false }: { creditCard?: boolean; creditLine?: boolean } = {},
 ): ColumnGuess {
   const sample = dataRows.slice(0, 20);
   const col = (j: number) => sample.map((r) => r[j] ?? "");
@@ -78,6 +79,8 @@ export function guessColumns(
   // 1. By header name.
   if (headerCells) {
     g.dateCol = take(findByName(headerCells, "date", taken));
+    // Before debit, so "Interest Charges" isn't taken as money out.
+    if (creditLine) g.interestCol = take(findByName(headerCells, "interest", taken));
     // Before balance, so a card's "Available Credit" / "Available Balance" isn't taken as the balance.
     if (creditCard) g.availableCol = take(findByName(headerCells, "available", taken));
     g.balanceCol = take(findByName(headerCells, "balance", taken));

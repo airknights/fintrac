@@ -5,17 +5,21 @@ import { pool, query, withTransaction } from "./index.js";
 // ── Accounts ───────────────────────────────────────────────────
 // How a transaction moves an account's balance. amount is + for money out:
 // that lowers a bank balance but raises what's owed on a card or loan.
-export const DELTA_SQL = `CASE WHEN a.type IN ('credit','loan') THEN t.amount ELSE -t.amount END`;
+// Interest only counts on accounts set to add it to the balance.
+export const DELTA_SQL = `CASE WHEN a.type IN ('credit','loan')
+  THEN t.amount + CASE WHEN a.interest_in_balance THEN t.interest ELSE 0 END
+  ELSE -t.amount END`;
 
 // Accounts with balances derived from the transactions: the anchor balance
 // (as of balance_as_of) plus every transaction dated after it. With no
 // balance_as_of (never set), every transaction counts.
 export const ACCOUNTS_SQL = `
   SELECT a.account_id, a.name, a.institution_name, a.type, a.subtype, a.iso_currency,
-         a.import_mapping, a.updated_at, a.anchor_balance, a.balance_as_of, a.credit_limit,
+         a.import_mapping, a.updated_at, a.anchor_balance, a.balance_as_of, a.credit_limit, a.interest_in_balance,
          a.anchor_balance + COALESCE(later.delta, 0) AS current_balance,
          CASE WHEN a.type = 'credit' AND a.credit_limit IS NOT NULL
-              THEN a.credit_limit - (a.anchor_balance + COALESCE(later.delta, 0)) END AS available_credit
+              THEN a.credit_limit - (a.anchor_balance + COALESCE(later.delta, 0)) END AS available_credit,
+         (SELECT COALESCE(SUM(t.interest), 0) FROM transactions t WHERE t.account_id = a.account_id) AS total_interest
   FROM accounts a
   LEFT JOIN LATERAL (
     SELECT SUM(${DELTA_SQL}) AS delta
@@ -101,13 +105,22 @@ export async function updateAccountBalance(
 // Updates only the fields given (undefined = leave as is). Returns false if no such account.
 export async function updateAccountDetails(
   accountId: string,
-  fields: { institutionName?: string | null; type?: string; subtype?: string | null; creditLimit?: number | null },
+  fields: {
+    name?: string;
+    institutionName?: string | null;
+    type?: string;
+    subtype?: string | null;
+    creditLimit?: number | null;
+    interestInBalance?: boolean;
+  },
 ): Promise<boolean> {
   const columns = {
+    name: fields.name,
     institution_name: fields.institutionName,
     type: fields.type,
     subtype: fields.subtype,
     credit_limit: fields.creditLimit,
+    interest_in_balance: fields.interestInBalance,
   };
   const set = Object.entries(columns).filter(([, v]) => v !== undefined);
   const assignments = set.map(([col], i) => `${col} = $${i + 1}`).join(", ");
@@ -136,6 +149,16 @@ export interface TransactionInput {
   isoCurrency?: string | null;
   date: string;
   category?: string | null;
+  // Credit lines: interest cost, kept apart from amount so it doesn't move the balance.
+  interest?: number;
+  // The amount as the file had it, when amount was zeroed for an interest row,
+  // so re-importing the file still finds the same transaction.
+  idAmount?: number;
+}
+
+// Whether interest on this account is tracked separately from its balance.
+export function isCreditLine(type: string, subtype: string | null): boolean {
+  return type === "credit" && /line of credit|credit line|heloc|\bloc\b/i.test(subtype ?? "");
 }
 
 // Deterministic id so re-importing an overlapping CSV export upserts instead
@@ -146,10 +169,10 @@ export function hashTransactionId(accountId: string, date: string, amount: numbe
 
 // Pass a transaction client to batch many upserts atomically.
 export async function upsertTransaction(t: TransactionInput, db: pg.Pool | pg.PoolClient = pool): Promise<void> {
-  const transactionId = hashTransactionId(t.accountId, t.date, t.amount, t.name ?? null);
+  const transactionId = hashTransactionId(t.accountId, t.date, t.idAmount ?? t.amount, t.name ?? null);
   await db.query(
-    `INSERT INTO transactions (transaction_id, account_id, name, merchant_name, amount, iso_currency, date, category)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO transactions (transaction_id, account_id, name, merchant_name, amount, iso_currency, date, category, interest)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (transaction_id) DO UPDATE SET
        account_id = excluded.account_id,
        name = excluded.name,
@@ -157,7 +180,8 @@ export async function upsertTransaction(t: TransactionInput, db: pg.Pool | pg.Po
        amount = excluded.amount,
        iso_currency = excluded.iso_currency,
        date = excluded.date,
-       category = excluded.category`,
+       category = excluded.category,
+       interest = excluded.interest`,
     [
       transactionId,
       t.accountId,
@@ -167,6 +191,7 @@ export async function upsertTransaction(t: TransactionInput, db: pg.Pool | pg.Po
       t.isoCurrency ?? "CAD",
       t.date,
       t.category ?? null,
+      t.interest ?? 0,
     ],
   );
 }

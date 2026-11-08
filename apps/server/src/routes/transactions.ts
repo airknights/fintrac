@@ -20,7 +20,7 @@ transactionRoutes.get("/transactions", async (c) => {
   const rows = await query(
     `WITH a AS (${ACCOUNTS_SQL}),
      ledger AS (
-       SELECT t.transaction_id, t.account_id, t.name, t.merchant_name, t.amount, t.date, t.category, t.seq,
+       SELECT t.transaction_id, t.account_id, t.name, t.merchant_name, t.amount, t.interest, t.date, t.category, t.seq,
               a.name AS account_name, a.type AS account_type,
               a.current_balance - COALESCE(SUM(${DELTA_SQL}) OVER (
                 PARTITION BY t.account_id ORDER BY t.date DESC, t.seq DESC

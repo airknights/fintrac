@@ -108,7 +108,9 @@ export function useUpdateAccount() {
       institutionName?: string | null;
       type?: string;
       subtype?: string | null;
+      name?: string;
       creditLimit?: number | null;
+      interestInBalance?: boolean;
     }) => api.patch(`/accounts/${accountId}`, fields),
     onSuccess: () => invalidateAll(qc),
   });

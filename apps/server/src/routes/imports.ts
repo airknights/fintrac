@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { query, withTransaction } from "../db/index.js";
-import { ACCOUNTS_SQL, DELTA_SQL, upsertTransaction, type TransactionInput } from "../db/queries.js";
+import { ACCOUNTS_SQL, DELTA_SQL, isCreditLine, upsertTransaction, type TransactionInput } from "../db/queries.js";
 
 export const importRoutes = new Hono();
 
@@ -90,6 +90,7 @@ const mappingSchema = z.object({
   creditCol: z.number().int().min(0).optional(),
   balanceCol: z.number().int().min(0).optional(),
   availableCol: z.number().int().min(0).optional(), // credit cards: available credit
+  interestCol: z.number().int().min(0).optional(), // credit lines: interest on each row
   // Single values from the info rows above the transactions; these win over columns.
   summaryBalance: cellRef.optional(),
   summaryAvailable: cellRef.optional(),
@@ -159,16 +160,20 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   const parsed = importSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
 
-  const [account] = await query<{ type: string }>(`SELECT type FROM accounts WHERE account_id = $1`, [accountId]);
+  const [account] = await query<{ type: string; subtype: string | null; interest_in_balance: boolean }>(
+    `SELECT type, subtype, interest_in_balance FROM accounts WHERE account_id = $1`,
+    [accountId],
+  );
   if (!account) return c.json({ error: "Account not found" }, 404);
 
   const { csvs, mapping } = parsed.data;
   const isDebt = DEBT_TYPES.has(account.type);
+  const creditLine = isCreditLine(account.type, account.subtype);
   const toImport: TransactionInput[] = [];
   let skipped = 0;
   // Each file's rows in chronological order (oldest first), with the bank's
   // running balance / available credit when those columns are mapped.
-  type FileRow = { date: string; amount: number; balance: number | null; available: number | null };
+  type FileRow = { date: string; amount: number; interest: number; balance: number | null; available: number | null };
   const files: FileRow[][] = [];
   // Per file: values picked from the info rows above the transactions.
   type Summary = { date: string | null; newestDate: string | null; balance: number | null; available: number | null };
@@ -196,9 +201,23 @@ importRoutes.post("/accounts/:id/import", async (c) => {
         if (mapping.flipSign) amount = -amount;
       }
 
+      // Credit lines: interest comes from its own column, or from a row that is
+      // only interest. Banks sign those rows either way, so go by the magnitude.
+      const idAmount = amount;
+      let interest = 0;
+      if (creditLine) {
+        const fromColumn = mapping.interestCol !== undefined ? parseOptionalAmount(row[mapping.interestCol]) : null;
+        if (fromColumn) {
+          interest = Math.abs(fromColumn);
+        } else if (name && /\binterest\b/i.test(name)) {
+          interest = /revers|refund|rebate/i.test(name) ? -Math.abs(amount) : Math.abs(amount);
+          amount = 0;
+        }
+      }
+
       const balance = mapping.balanceCol !== undefined ? parseOptionalAmount(row[mapping.balanceCol]) : null;
       const available = mapping.availableCol !== undefined ? parseOptionalAmount(row[mapping.availableCol]) : null;
-      parsedRows.push({ accountId, name, amount, date, isoCurrency: null, category: null, balance, available });
+      parsedRows.push({ accountId, name, amount, date, isoCurrency: null, category: null, interest, idAmount, balance, available });
     }
 
     // Banks list rows newest-first or oldest-first; normalize to oldest-first
@@ -207,7 +226,15 @@ importRoutes.post("/accounts/:id/import", async (c) => {
     const last = parsedRows[parsedRows.length - 1];
     const chronological = first && last && first.date > last.date ? parsedRows.reverse() : parsedRows;
     for (const { balance: _, available: __, ...t } of chronological) toImport.push(t);
-    files.push(chronological.map((r) => ({ date: r.date, amount: r.amount, balance: r.balance, available: r.available })));
+    files.push(
+      chronological.map((r) => ({
+        date: r.date,
+        amount: r.amount,
+        interest: r.interest ?? 0,
+        balance: r.balance,
+        available: r.available,
+      })),
+    );
     summaries.push({
       date: mapping.summaryDate ? normalizeDate(cell(mapping.summaryDate) ?? "", mapping.dateFormat) : null,
       newestDate: chronological[chronological.length - 1]?.date ?? null,
@@ -226,7 +253,7 @@ importRoutes.post("/accounts/:id/import", async (c) => {
   const owedShownNegative = isDebt && allBalances.filter((b) => b < 0).length > allBalances.length / 2;
   const toOurBalance = (b: number) => (owedShownNegative ? -b : b);
   // How a transaction should move our balance (amount is + for money out).
-  const delta = (amount: number) => (isDebt ? amount : -amount);
+  const delta = (r: FileRow) => (isDebt ? r.amount + (account.interest_in_balance ? r.interest : 0) : -r.amount);
 
   // A lone summary balance has no column to read the sign convention from;
   // a card's balance owed is taken as a positive amount either way.
@@ -285,7 +312,7 @@ importRoutes.post("/accounts/:id/import", async (c) => {
       if (prev.balance === null || cur.balance === null) continue;
       checked++;
       const change = toOurBalance(cur.balance) - toOurBalance(prev.balance);
-      if (Math.abs(change - delta(cur.amount)) > 0.005) {
+      if (Math.abs(change - delta(cur)) > 0.005) {
         mismatches++;
         firstMismatchDate ??= cur.date;
       }

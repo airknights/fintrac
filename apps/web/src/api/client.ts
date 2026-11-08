@@ -35,6 +35,8 @@ export interface Account {
   available_credit: number | null; // credit_limit - current_balance (credit cards with a known limit)
   iso_currency: string;
   import_mapping: ImportMapping | null; // saved from the last CSV import
+  total_interest: number; // credit lines: interest to date
+  interest_in_balance: boolean; // credit lines: does billed interest add to what's owed?
 }
 
 export interface NetWorth {
@@ -100,6 +102,7 @@ export interface ImportMapping {
   creditCol?: number;
   balanceCol?: number;
   availableCol?: number; // credit cards: available credit
+  interestCol?: number; // credit lines: interest on each row
   // Single values from the info rows above the transactions; these win over columns.
   summaryBalance?: CellRef;
   summaryAvailable?: CellRef;
@@ -132,6 +135,7 @@ export interface Transaction {
   name: string | null;
   merchant_name: string | null;
   amount: number; // + = money out
+  interest: number; // credit lines: interest cost, shown apart from amount
   date: string;
   category: string | null;
   running_balance: number; // account balance after this transaction

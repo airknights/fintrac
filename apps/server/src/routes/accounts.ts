@@ -57,24 +57,28 @@ accountRoutes.patch("/accounts/:id/balance", async (c) => {
   return c.json({ ok: true });
 });
 
-// Edit bank / type / subtype / credit limit; any subset. Blank bank or subtype
-// clears it; null credit limit clears it.
+// Edit name / bank / type / subtype / credit limit; any subset. Blank bank or
+// subtype clears it; null credit limit clears it. An account must keep a name.
 const updateSchema = z.object({
+  name: z.string().trim().min(1).optional(),
   institutionName: z.string().trim().nullable().optional(),
   type: accountType.optional(),
   subtype: z.string().trim().nullable().optional(),
   creditLimit: z.number().min(0).nullable().optional(),
+  interestInBalance: z.boolean().optional(),
 });
 
 accountRoutes.patch("/accounts/:id", async (c) => {
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
-  const { institutionName, type, subtype, creditLimit } = parsed.data;
+  const { name, institutionName, type, subtype, creditLimit, interestInBalance } = parsed.data;
   const found = await updateAccountDetails(c.req.param("id"), {
+    name,
     institutionName: institutionName === undefined ? undefined : institutionName || null,
     type,
     subtype: subtype === undefined ? undefined : subtype || null,
     creditLimit,
+    interestInBalance,
   });
   if (!found) return c.json({ error: "Account not found" }, 404);
   return c.json({ ok: true });

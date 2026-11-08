@@ -11,7 +11,7 @@ import {
   useUpdateAccount,
 } from "../hooks/api.js";
 import { money, titleCase } from "../format.js";
-import { DEBT_TYPES, groupByInstitution, inferAccountKind, inferInstitution } from "../accounts.js";
+import { DEBT_TYPES, groupByInstitution, inferAccountKind, inferInstitution, isCreditLine } from "../accounts.js";
 import { InstitutionPicker } from "../components/InstitutionPicker.js";
 import { guessColumns, guessHeaderRow, guessSummary, summaryCells, type SummaryCell } from "../importGuess.js";
 
@@ -304,10 +304,13 @@ function AccountRow({ account }: { account: Account }) {
 
 function EditAccountForm({ account, onDone }: { account: Account; onDone: () => void }) {
   const update = useUpdateAccount();
+  const [name, setName] = useState(account.name);
   const [institutionName, setInstitutionName] = useState(account.institution_name ?? "");
   const [type, setType] = useState(account.type);
   const [subtype, setSubtype] = useState(account.subtype ?? "");
   const [creditLimit, setCreditLimit] = useState(account.credit_limit === null ? "" : String(account.credit_limit));
+  const [interestInBalance, setInterestInBalance] = useState(account.interest_in_balance);
+  const creditLine = isCreditLine({ type, subtype });
   // The stored balance is "money in the account" for bank types but "amount
   // owed" for credit/loan, so switching between them flips its meaning.
   const debtChanged = DEBT_TYPES.has(type) !== DEBT_TYPES.has(account.type);
@@ -317,11 +320,14 @@ function EditAccountForm({ account, onDone }: { account: Account; onDone: () => 
     update.mutate(
       {
         accountId: account.account_id,
+        name: name.trim(),
         institutionName: institutionName.trim() || null,
         type,
         subtype: subtype.trim() || null,
         // Only cards / lines of credit have a limit; blank clears it.
         ...(type === "credit" ? { creditLimit: creditLimit.trim() === "" ? null : Number(creditLimit) } : {}),
+        // Only credit lines keep interest apart, so it's meaningless on anything else.
+        interestInBalance: creditLine && interestInBalance,
       },
       { onSuccess: onDone },
     );
@@ -331,6 +337,9 @@ function EditAccountForm({ account, onDone }: { account: Account; onDone: () => 
     <form onSubmit={handleSubmit}>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <strong>Edit {account.name}</strong>
+        <label>
+          Name <input type="text" value={name} onChange={(e) => setName(e.target.value)} required />
+        </label>
         <InstitutionPicker label="Bank" value={institutionName} onChange={setInstitutionName} />
         <label>
           Type{" "}
@@ -360,7 +369,13 @@ function EditAccountForm({ account, onDone }: { account: Account; onDone: () => 
             />
           </label>
         )}
-        <button className="btn primary small" type="submit" disabled={update.isPending}>
+        {creditLine && (
+          <label title="Leave off if the bank collects interest from another account.">
+            <input type="checkbox" checked={interestInBalance} onChange={(e) => setInterestInBalance(e.target.checked)} />{" "}
+            Interest adds to the balance
+          </label>
+        )}
+        <button className="btn primary small" type="submit" disabled={update.isPending || !name.trim()}>
           {update.isPending ? "Saving…" : "Save"}
         </button>
         <button className="btn small" type="button" onClick={onDone}>
@@ -405,7 +420,7 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
       header === null ? null : (rows[header] ?? null),
       rows.slice(dataStart),
       columnCount,
-      { creditCard: account.type === "credit" },
+      { creditCard: account.type === "credit", creditLine: isCreditLine(account) },
     );
     const summary = guessSummary(summaryCells(rows, header, dataStart), { creditCard: account.type === "credit" });
     setAmountMode(mode);
@@ -710,6 +725,17 @@ function ImportPanel({ account, onDone }: { account: Account; onDone: () => void
                 headers={headers}
                 value={mapping.availableCol}
                 onChange={(v) => setMapping((m) => ({ ...m, availableCol: v }))}
+                allowNone
+              />
+            </div>
+          )}
+          {isCreditLine(account) && (
+            <div style={{ marginTop: 8 }}>
+              <ColSelect
+                label={`Interest column (optional — rows described as interest are picked up automatically; interest ${account.interest_in_balance ? "adds to" : "doesn't change"} the balance)`}
+                headers={headers}
+                value={mapping.interestCol}
+                onChange={(v) => setMapping((m) => ({ ...m, interestCol: v }))}
                 allowNone
               />
             </div>

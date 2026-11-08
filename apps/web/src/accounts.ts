@@ -2,6 +2,11 @@ import type { Account } from "./api/client.js";
 
 export const DEBT_TYPES = new Set(["credit", "loan"]);
 
+// Credit lines track interest apart from the balance.
+export function isCreditLine(account: Pick<Account, "type" | "subtype">): boolean {
+  return account.type === "credit" && /line of credit|credit line|heloc|\bloc\b/i.test(account.subtype ?? "");
+}
+
 export const INSTITUTIONS = [
   "Affirm",
   "CIBC",
@@ -30,7 +35,7 @@ const INSTITUTION_KEYWORDS: Array<[institution: string, pattern: RegExp]> = [
 // Words in an account name that identify what kind of account it is. First
 // match wins, so more specific patterns come first ("TFSA savings" is a TFSA).
 const KIND_KEYWORDS: Array<[pattern: RegExp, kind: { type: string; subtype: string }]> = [
-  [/\bline of credit\b|\bloc\b|\bheloc\b/i, { type: "credit", subtype: "line of credit" }],
+  [/\bline of credit\b|\bcredit line\b|\bloc\b|\bheloc\b/i, { type: "credit", subtype: "line of credit" }],
   [/\bmortgage\b/i, { type: "loan", subtype: "mortgage" }],
   [/\b(car|auto|vehicle) loan\b/i, { type: "loan", subtype: "auto loan" }],
   [/\bstudent loan\b|\bosap\b/i, { type: "loan", subtype: "student loan" }],

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAccounts, useTransactions } from "../hooks/api.js";
 import { money } from "../format.js";
-import { DEBT_TYPES, groupByInstitution } from "../accounts.js";
+import { DEBT_TYPES, groupByInstitution, isCreditLine } from "../accounts.js";
 
 export function Transactions() {
   // ?account=<id> so account rows can link straight to their transactions.
@@ -23,6 +23,7 @@ export function Transactions() {
   const tx = useTransactions({ accountId: accountId || undefined, search: search || undefined });
   const rows = tx.data?.pages.flatMap((p) => p.transactions) ?? [];
   const total = tx.data?.pages[0]?.total ?? 0;
+  const showInterest = account ? isCreditLine(account) : rows.some((t) => t.interest !== 0);
 
   return (
     <div className="page">
@@ -76,6 +77,17 @@ export function Transactions() {
               <span className="muted small-note">of {money(account.credit_limit)} limit</span>
             </div>
           )}
+          {isCreditLine(account) && (
+            <div className="stat">
+              <span className="label">Interest paid</span>
+              <span className="value neg">{money(account.total_interest)}</span>
+              <span className="muted small-note">
+                {account.interest_in_balance
+                  ? "Cost of the credit line, added to the balance"
+                  : "Cost of the credit line, not part of the balance"}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -98,6 +110,7 @@ export function Transactions() {
                     {!account && <th>Account</th>}
                     <th>Description</th>
                     <th className="right">Amount</th>
+                    {showInterest && <th className="right">Interest</th>}
                     {account && <th className="right">Balance</th>}
                   </tr>
                 </thead>
@@ -108,10 +121,19 @@ export function Transactions() {
                       {!account && <td>{t.account_name}</td>}
                       <td>{t.name ?? t.merchant_name ?? "—"}</td>
                       {/* amount is + for money out; show spending as − and money in as + */}
-                      <td className={`right ${t.amount > 0 ? "neg" : "pos"}`} style={{ whiteSpace: "nowrap" }}>
-                        {t.amount > 0 ? "−" : "+"}
-                        {money(Math.abs(t.amount))}
-                      </td>
+                      {t.amount === 0 && t.interest !== 0 ? (
+                        <td className="right muted">—</td>
+                      ) : (
+                        <td className={`right ${t.amount > 0 ? "neg" : "pos"}`} style={{ whiteSpace: "nowrap" }}>
+                          {t.amount > 0 ? "−" : "+"}
+                          {money(Math.abs(t.amount))}
+                        </td>
+                      )}
+                      {showInterest && (
+                        <td className="right neg" style={{ whiteSpace: "nowrap" }}>
+                          {t.interest !== 0 ? money(t.interest) : ""}
+                        </td>
+                      )}
                       {account && (
                         <td className="right" style={{ whiteSpace: "nowrap" }}>
                           {money(t.running_balance)}
