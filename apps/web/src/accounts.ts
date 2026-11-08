@@ -3,13 +3,14 @@ import type { Account } from "./api/client.js";
 export const DEBT_TYPES = new Set(["credit", "loan"]);
 
 export const INSTITUTIONS = [
-  "TD Canada Trust",
+  "Affirm",
   "CIBC",
   "CTFS (Canadian Tire Financial Services)",
-  "Financeit",
-  "Tangerine",
   "Fairstone",
-  "Affirm",
+  "Financeit",
+  "RBC Royal Bank",
+  "Tangerine",
+  "TD Canada Trust",
 ];
 
 export const NO_INSTITUTION = "No bank set";
@@ -23,6 +24,7 @@ const INSTITUTION_KEYWORDS: Array<[institution: string, pattern: RegExp]> = [
   ["Tangerine", /\btangerine\b/i],
   ["Fairstone", /\bfairstone\b/i],
   ["Affirm", /\baffirm\b/i],
+  ["RBC Royal Bank", /\brbc\b|\broyal bank\b/i],
 ];
 
 // Words in an account name that identify what kind of account it is. First

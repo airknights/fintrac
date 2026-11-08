@@ -40,7 +40,7 @@ export function InstitutionPicker({
       {other && (
         <label>
           Institution name{" "}
-          <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder="e.g. RBC" autoFocus />
+          <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder="e.g. Scotiabank" autoFocus />
         </label>
       )}
     </>
